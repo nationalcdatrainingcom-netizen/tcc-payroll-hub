@@ -375,12 +375,45 @@ const PEACE_CLASSROOMS = [
   { section: 'Twos/Threes - Tigers', roles: ['Lead','Assistant'] },
   { section: 'GSRP - Penguins', roles: ['Lead','Assistant','Caregiver'] },
   { section: 'GSRP - Dinos', roles: ['Lead','Assistant','Assistant'] },
-  { section: 'Threes/Fours - Flamingos', roles: ['Lead','Assistant'] },
+  { section: 'Threes/Fours Flamingos', roles: ['Lead','Assistant'] },
   { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater','Floater','Floater','Floater'] },
-  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub','Sub','Sub','Sub','Sub'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
   { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
   { section: 'Supervised Volunteers', roles: ['','','','','',''] }
 ];
+
+const NILES_CLASSROOMS = [
+  { section: 'Infants/Ones', roles: ['Lead','Assistant','Assistant','Assistant'] },
+  { section: 'Ones/Twos', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Strong Beginnings - Threes', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - 1 (4-Day)', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - 2 (4-Day)', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Toddler', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Multi-Age - Miss Judy', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub'] },
+  { section: 'Therapist / Unsupervised Volunteers', roles: ['','',''] },
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] }
+];
+
+const MCC_CLASSROOMS = [
+  { section: 'Toddlers - Purple', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Pre-Primary - Yellow', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Primary - Red', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Orange', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Blue', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Pink', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
+  { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] }
+];
+
+const CENTER_CLASSROOMS = {
+  'Peace Boulevard': PEACE_CLASSROOMS,
+  'Niles': NILES_CLASSROOMS,
+  'Montessori': MCC_CLASSROOMS
+};
 
 const REASON_CATEGORIES = ['Position Change', 'Education Level', 'CDA Credential', 'Registered Apprentice Hours', 'Annual Review', 'Market Adjustment', 'Other'];
 
@@ -1362,7 +1395,7 @@ async function renderStaffingPlan() {
   try { spData = await api('/api/staffing-plan'); } catch(e) {}
   
   // If no data, show the template structure
-  const classrooms = PEACE_CLASSROOMS; // Using Peace as template, same structure for all
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
   
   classrooms.forEach(cls => {
     html += `<tr style="background:var(--navy);color:white"><td colspan="19" style="padding:8px 14px;font-weight:700">${cls.section}</td></tr>`;
