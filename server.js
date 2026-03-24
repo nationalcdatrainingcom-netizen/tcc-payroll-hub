@@ -883,6 +883,15 @@ app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async 
   }
 });
 
+app.delete('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async (req, res) => {
+  try {
+    await pool.query('DELETE FROM staffing_plan WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Signature storage
 app.post('/api/settings/signature', requireRole('owner'), async (req, res) => {
   try {
