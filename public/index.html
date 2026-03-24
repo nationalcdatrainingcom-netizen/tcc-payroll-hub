@@ -1118,21 +1118,35 @@ async function importTimecard() {
   const fd = new FormData();
   fd.append('file', file);
   
-  const result = await apiForm('/api/import-timecard', fd);
   const resultEl = document.getElementById('importResult');
+  resultEl.innerHTML = '<em style="color:var(--gray-400)">Processing CSV...</em>';
+  
+  const result = await apiForm('/api/import-timecard', fd);
   
   if (result.error) {
     resultEl.innerHTML = `<div class="confidentiality-banner" style="background:var(--danger-bg);border-color:var(--danger);color:var(--danger)">Error: ${result.error}</div>`;
   } else {
-    resultEl.innerHTML = `<div class="confidentiality-banner" style="background:var(--success-bg);border-color:var(--success);color:var(--success)">
-      ✅ Imported ${result.imported} records from CSV. Review data below.
+    let html = `<div class="confidentiality-banner" style="background:var(--success-bg);border-color:var(--success);color:var(--success)">
+      ✅ Processed ${result.imported} timecard rows — ${result.matched} matched to employees, ${result.savedDays} daily hour records saved.
     </div>`;
     
-    if (result.data && result.data.length > 0) {
-      const cols = Object.keys(result.data[0]);
-      resultEl.innerHTML += `<div class="table-scroll"><table class="data-table"><thead><tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr></thead>
-        <tbody>${result.data.slice(0,30).map(row => `<tr>${cols.map(c=>`<td style="font-size:11px">${row[c]||''}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+    if (result.unmatched > 0) {
+      html += `<div class="confidentiality-banner" style="background:var(--warning-bg);border-color:var(--warning);color:var(--warning)">
+        ⚠️ ${result.unmatched} rows could not be matched: ${result.unmatchedNames.join(', ')}
+        <br><small>These staff may need to be added to the Employee Roster first.</small>
+      </div>`;
     }
+    
+    if (result.preview && result.preview.length > 0) {
+      html += `<div class="card" style="margin-top:16px"><div class="card-header"><h3>Import Preview (first 40 rows)</h3></div><div class="card-body"><div class="table-scroll">
+        <table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Times</th><th>Breaks</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
+      result.preview.forEach(r => {
+        html += `<tr><td style="white-space:nowrap"><strong>${r.name}</strong></td><td>${r.date}</td><td style="font-size:11px">${r.times}</td><td style="font-size:11px">${r.breaks}</td><td>${r.billable}</td><td style="font-family:'JetBrains Mono',monospace;font-weight:600">${r.hours}</td></tr>`;
+      });
+      html += `</tbody></table></div></div></div>`;
+    }
+    
+    resultEl.innerHTML = html;
   }
 }
 
