@@ -153,6 +153,42 @@ async function initDB() {
       value TEXT,
       updated_at TIMESTAMP DEFAULT NOW()
     );
+
+    CREATE TABLE IF NOT EXISTS payroll_periods (
+      id SERIAL PRIMARY KEY,
+      period_start DATE NOT NULL,
+      period_end DATE NOT NULL,
+      pay_date DATE NOT NULL,
+      center VARCHAR(100) NOT NULL,
+      status VARCHAR(30) DEFAULT 'open' CHECK (status IN ('open','director_submitted','processing','closed')),
+      timecards_uploaded BOOLEAN DEFAULT FALSE,
+      timecards_signed_by VARCHAR(200),
+      timecards_signed_at TIMESTAMP,
+      timeoff_approved BOOLEAN DEFAULT FALSE,
+      timeoff_signed_by VARCHAR(200),
+      timeoff_signed_at TIMESTAMP,
+      director_closed BOOLEAN DEFAULT FALSE,
+      director_closed_by VARCHAR(200),
+      director_closed_at TIMESTAMP,
+      payroll_closed BOOLEAN DEFAULT FALSE,
+      payroll_closed_by VARCHAR(200),
+      payroll_closed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW(),
+      UNIQUE(period_start, period_end, center)
+    );
+
+    CREATE TABLE IF NOT EXISTS payroll_signatures (
+      id SERIAL PRIMARY KEY,
+      period_start DATE NOT NULL,
+      period_end DATE NOT NULL,
+      center VARCHAR(100),
+      action_type VARCHAR(50) NOT NULL,
+      signed_by_user_id INTEGER REFERENCES users(id),
+      signed_by_name VARCHAR(200) NOT NULL,
+      signature_text VARCHAR(500),
+      statement TEXT,
+      created_at TIMESTAMP DEFAULT NOW()
+    );
   `);
 
   // Seed default users if none exist
@@ -345,6 +381,14 @@ app.get('/api/pay-period', requireAuth, (req, res) => {
   res.json(getPayPeriod(date));
 });
 
+// Employees hidden from HR view (only visible to owner/payroll and their own director)
+const HR_HIDDEN_NAMES = ['wardlaw_jay','wardlaw_mary','swem_kirsten','wardlaw_kelsey','wardlaw_jared','phillips_shari','fountain_gabrielle'];
+
+function isHRHidden(emp) {
+  const key = `${emp.last_name.toLowerCase()}_${emp.first_name.toLowerCase()}`;
+  return HR_HIDDEN_NAMES.some(h => key.startsWith(h.split('_')[0]) && key.includes(h.split('_')[1]));
+}
+
 // Employees
 app.get('/api/employees', requireAuth, async (req, res) => {
   try {
@@ -359,6 +403,11 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     
     const result = await pool.query(query, params);
     let employees = result.rows;
+    
+    // HR: hide admin/owner/director employees
+    if (user.role === 'hr') {
+      employees = employees.filter(e => !isHRHidden(e));
+    }
     
     // Strip pay rate for directors
     if (!canSeePayRate(user)) {
@@ -415,6 +464,11 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
     let employee = emp.rows[0];
     
     if (user.role === 'director' && employee.center !== user.center) {
+      return res.status(403).json({ error: 'Access denied' });
+    }
+    
+    // HR cannot view hidden admin employees
+    if (user.role === 'hr' && isHRHidden(employee)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
@@ -863,6 +917,383 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
     const hash = await bcrypt.hash(new_password, 10);
     await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.session.user.id]);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========================
+// PAYROLL PERIOD WORKFLOW
+// ========================
+
+// Get or create payroll period for a center
+app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
+  try {
+    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
+    const user = req.session.user;
+    const centers = user.role === 'director' ? [user.center] : ['Peace Boulevard', 'Niles', 'Montessori'];
+    
+    const results = {};
+    for (const center of centers) {
+      // Upsert period
+      await pool.query(
+        `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (period_start, period_end, center) DO NOTHING`,
+        [pp.start, pp.end, pp.payDate, center]
+      );
+      const r = await pool.query(
+        'SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3',
+        [pp.start, pp.end, center]
+      );
+      results[center] = r.rows[0];
+    }
+    
+    // Get signatures for this period
+    const sigs = await pool.query(
+      'SELECT * FROM payroll_signatures WHERE period_start = $1 AND period_end = $2 ORDER BY created_at',
+      [pp.start, pp.end]
+    );
+    
+    res.json({ payPeriod: pp, periods: results, signatures: sigs.rows });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director signs off on timecards
+app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center, signature_name } = req.body;
+    const user = req.session.user;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET timecards_uploaded = TRUE, timecards_signed_by = $1, timecards_signed_at = NOW()
+       WHERE period_start = $2 AND period_end = $3 AND center = $4`,
+      [signature_name, period_start, period_end, center]
+    );
+    
+    await pool.query(
+      `INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement)
+       VALUES ($1, $2, $3, 'timecards_verified', $4, $5, $6, 'I verify that the uploaded timecards have been reviewed and are accurate.')`,
+      [period_start, period_end, center, user.id, user.full_name, signature_name]
+    );
+    
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director signs off on time-off
+app.post('/api/payroll-workflow/sign-timeoff', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center, signature_name } = req.body;
+    const user = req.session.user;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET timeoff_approved = TRUE, timeoff_signed_by = $1, timeoff_signed_at = NOW()
+       WHERE period_start = $2 AND period_end = $3 AND center = $4`,
+      [signature_name, period_start, period_end, center]
+    );
+    
+    await pool.query(
+      `INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement)
+       VALUES ($1, $2, $3, 'timeoff_verified', $4, $5, $6, 'I verify that all paid and unpaid time off entries for this pay period are accurate.')`,
+      [period_start, period_end, center, user.id, user.full_name, signature_name]
+    );
+    
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director closes out their center
+app.post('/api/payroll-workflow/director-close', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center, signature_name } = req.body;
+    const user = req.session.user;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET director_closed = TRUE, director_closed_by = $1, director_closed_at = NOW(), status = 'director_submitted'
+       WHERE period_start = $2 AND period_end = $3 AND center = $4`,
+      [signature_name, period_start, period_end, center]
+    );
+    
+    await pool.query(
+      `INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement)
+       VALUES ($1, $2, $3, 'director_closeout', $4, $5, $6, 'I certify that all payroll information for this pay period has been reviewed, verified, and submitted for processing.')`,
+      [period_start, period_end, center, user.id, user.full_name, signature_name]
+    );
+    
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Jared closes out payroll
+app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, signature_name } = req.body;
+    const user = req.session.user;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET payroll_closed = TRUE, payroll_closed_by = $1, payroll_closed_at = NOW(), status = 'closed'
+       WHERE period_start = $2 AND period_end = $3`,
+      [signature_name, period_start, period_end]
+    );
+    
+    for (const center of ['Peace Boulevard', 'Niles', 'Montessori']) {
+      await pool.query(
+        `INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement)
+         VALUES ($1, $2, $3, 'payroll_processed', $4, $5, $6, 'Payroll has been processed for this pay period.')`,
+        [period_start, period_end, center, user.id, user.full_name, signature_name]
+      );
+    }
+    
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========================
+// PAYROLL REPORT
+// ========================
+app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
+  try {
+    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
+    const center = req.query.center;
+    
+    // Get employees
+    let empQuery = 'SELECT * FROM employees WHERE is_active = TRUE';
+    let empParams = [];
+    if (center) { empQuery += ' AND center = $1'; empParams = [center]; }
+    empQuery += ' ORDER BY center, last_name, first_name';
+    const empsResult = await pool.query(empQuery, empParams);
+    
+    // Filter out hidden employees for HR
+    let empRows = empsResult.rows;
+    if (req.session.user.role === 'hr') {
+      empRows = empRows.filter(e => !isHRHidden(e));
+    }
+    
+    const report = [];
+    
+    for (const emp of empRows) {
+      // Daily hours in this pay period
+      const hours = await pool.query(
+        `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date >= $2 AND work_date <= $3 ORDER BY work_date`,
+        [emp.id, pp.start, pp.end]
+      );
+      
+      // Calculate OT using Sun-Sat weeks
+      const weeks = getMonToSunWeeks(pp.start, pp.end);
+      // Actually we need Sun-Sat weeks
+      const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
+      
+      const allDates = new Set();
+      sunSatWeeks.forEach(w => {
+        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+          allDates.add(d.toISOString().split('T')[0]);
+        }
+      });
+      
+      // Get ALL hours for overlapping weeks (including outside pay period)
+      const allHours = await pool.query(
+        `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`,
+        [emp.id, [...allDates]]
+      );
+      const hoursMap = {};
+      allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
+      
+      let totalRegular = 0, totalOT = 0, totalHours = 0;
+      const weekDetails = [];
+      
+      for (const w of sunSatWeeks) {
+        let weekTotal = 0;
+        let weekInPeriod = 0;
+        const days = [];
+        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+          const ds = d.toISOString().split('T')[0];
+          const h = hoursMap[ds] || 0;
+          weekTotal += h;
+          const inPeriod = ds >= pp.start && ds <= pp.end;
+          if (inPeriod) weekInPeriod += h;
+          days.push({ date: ds, hours: h, inPeriod });
+        }
+        
+        const weekOT = Math.max(0, weekTotal - 40);
+        // Proportionally allocate OT to in-period days
+        const weekReg = weekTotal - weekOT;
+        
+        weekDetails.push({ ...w, days, weekTotal, weekOT, weekReg, weekInPeriod });
+        totalHours += weekInPeriod;
+      }
+      
+      // Simple OT calc: sum all hours in period, then calculate based on week totals
+      let periodRegular = 0, periodOT = 0;
+      for (const w of weekDetails) {
+        if (w.weekTotal <= 40) {
+          periodRegular += w.weekInPeriod;
+        } else {
+          // Hours over 40 in this week are OT
+          const otHours = w.weekTotal - 40;
+          // Determine how many OT hours fall within the pay period
+          let inPeriodAfter40 = 0;
+          let runningTotal = 0;
+          for (const day of w.days) {
+            runningTotal += day.hours;
+            if (day.inPeriod) {
+              if (runningTotal > 40) {
+                inPeriodAfter40 += Math.min(day.hours, runningTotal - 40);
+              }
+            }
+          }
+          periodOT += inPeriodAfter40;
+          periodRegular += (w.weekInPeriod - inPeriodAfter40);
+        }
+      }
+      
+      // PTO in this period
+      const pto = await pool.query(
+        `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
+        [emp.id, pp.start, pp.end]
+      );
+      const ptoDays = parseInt(pto.rows[0].count);
+      
+      // Unpaid in this period
+      const unpaid = await pool.query(
+        `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2 AND entry_date <= $3`,
+        [emp.id, pp.start, pp.end]
+      );
+      const unpaidDays = parseInt(unpaid.rows[0].count);
+      
+      // Pay increases in this period
+      const increases = await pool.query(
+        `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`,
+        [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']
+      );
+      
+      report.push({
+        id: emp.id,
+        first_name: emp.first_name,
+        last_name: emp.last_name,
+        center: emp.center,
+        position: emp.position,
+        hourly_rate: emp.hourly_rate,
+        is_full_time: emp.is_full_time,
+        totalHours: Math.round(totalHours * 100) / 100,
+        regularHours: Math.round(periodRegular * 100) / 100,
+        overtimeHours: Math.round(periodOT * 100) / 100,
+        ptoDays,
+        unpaidDays,
+        payIncreases: increases.rows,
+        weekDetails
+      });
+    }
+    
+    res.json({ payPeriod: pp, report });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function getSunSatWeeks(startDate, endDate) {
+  const start = new Date(startDate + 'T12:00:00');
+  const end = new Date(endDate + 'T12:00:00');
+  const weeks = [];
+  
+  // Find the Sunday on or before start
+  let sunday = new Date(start);
+  const startDay = sunday.getDay();
+  sunday.setDate(sunday.getDate() - startDay);
+  
+  while (sunday <= end) {
+    const saturday = new Date(sunday);
+    saturday.setDate(saturday.getDate() + 6);
+    weeks.push({
+      sunday: sunday.toISOString().split('T')[0],
+      saturday: saturday.toISOString().split('T')[0]
+    });
+    sunday = new Date(sunday);
+    sunday.setDate(sunday.getDate() + 7);
+  }
+  
+  return weeks;
+}
+
+// Get adjacent pay periods for navigation
+app.get('/api/pay-periods/list', requireAuth, async (req, res) => {
+  try {
+    const current = getPayPeriod(new Date());
+    const periods = [];
+    
+    // Generate 6 months back and 2 forward
+    for (let i = -12; i <= 4; i++) {
+      const d = new Date();
+      // Approximate: shift by half-months
+      d.setDate(d.getDate() + (i * 15));
+      const pp = getPayPeriod(d);
+      // Deduplicate
+      if (!periods.find(p => p.start === pp.start)) {
+        pp.isCurrent = pp.start === current.start;
+        periods.push(pp);
+      }
+    }
+    
+    periods.sort((a, b) => a.start.localeCompare(b.start));
+    res.json(periods);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Smart default pay period based on role
+app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
+  try {
+    const user = req.session.user;
+    const now = new Date();
+    const currentPP = getPayPeriod(now);
+    
+    if (user.role === 'payroll') {
+      // Jared: show the period being processed (current paycheck)
+      // On Mar 24, the Mar 9-23 period is being processed for Apr 1 paycheck
+      // Check if the current period is closed; if so, show next
+      const status = await pool.query(
+        `SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND payroll_closed = TRUE LIMIT 1`,
+        [currentPP.start, currentPP.end]
+      );
+      if (status.rows.length > 0) {
+        // Current is closed, show next period
+        const nextDate = new Date(currentPP.end + 'T12:00:00');
+        nextDate.setDate(nextDate.getDate() + 1);
+        res.json(getPayPeriod(nextDate));
+      } else {
+        // Show the period that just ended (needs processing)
+        // On Mar 24 (which is in the Mar24-Apr8 period), show Mar9-23
+        const prevDate = new Date(currentPP.start + 'T12:00:00');
+        prevDate.setDate(prevDate.getDate() - 1);
+        res.json(getPayPeriod(prevDate));
+      }
+    } else if (user.role === 'director') {
+      // Directors: show current period unless it's submitted, then show next
+      const status = await pool.query(
+        `SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3 AND director_closed = TRUE`,
+        [currentPP.start, currentPP.end, user.center]
+      );
+      if (status.rows.length > 0) {
+        const nextDate = new Date(currentPP.end + 'T12:00:00');
+        nextDate.setDate(nextDate.getDate() + 1);
+        res.json(getPayPeriod(nextDate));
+      } else {
+        res.json(currentPP);
+      }
+    } else {
+      // Owner/HR: show current period
+      res.json(currentPP);
+    }
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
