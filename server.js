@@ -608,11 +608,18 @@ app.get('/api/documents/:id/download', requireAuth, async (req, res) => {
   }
 });
 
-// CSV Timecard import
+// Parse "X hrs Y min" to decimal hours
+function parseBillableHours(str) {
+  if (!str) return 0;
+  const m = str.match(/(\d+)\s*hrs?\s*(\d+)\s*min/i);
+  if (m) return parseInt(m[1]) + parseInt(m[2]) / 60;
+  return 0;
+}
+
+// CSV Timecard import - Playground format
 app.post('/api/import-timecard', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
   try {
     const results = [];
-    const payPeriod = getPayPeriod(new Date());
     
     await new Promise((resolve, reject) => {
       fs.createReadStream(req.file.path)
@@ -623,7 +630,88 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll'), upload.single(
     });
     
     fs.unlinkSync(req.file.path);
-    res.json({ imported: results.length, data: results, payPeriod });
+    
+    // Parse and match to employees
+    let matched = 0, unmatched = 0, totalRows = 0;
+    const unmatchedNames = new Set();
+    const dailySummary = {}; // {empId-date: hours}
+    
+    for (const row of results) {
+      const lastName = (row['Last Name'] || '').trim();
+      const firstName = (row['First Name'] || '').trim();
+      const dateStr = (row['Date'] || '').trim();
+      const billable = (row['Billable'] || '').trim();
+      
+      if (!lastName || !dateStr) continue;
+      totalRows++;
+      
+      const hours = parseBillableHours(billable);
+      
+      // Parse date M/D/YYYY
+      const dateParts = dateStr.split('/');
+      if (dateParts.length !== 3) continue;
+      const isoDate = `${dateParts[2]}-${dateParts[0].padStart(2,'0')}-${dateParts[1].padStart(2,'0')}`;
+      
+      // Find matching employee (case-insensitive, partial match for hyphenated/compound names)
+      const emp = await pool.query(
+        `SELECT id FROM employees WHERE 
+         (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
+         AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%')
+         AND is_active = TRUE LIMIT 1`,
+        [lastName, firstName]
+      );
+      
+      if (emp.rows.length > 0) {
+        const empId = emp.rows[0].id;
+        const key = `${empId}-${isoDate}`;
+        dailySummary[key] = (dailySummary[key] || 0) + hours;
+        matched++;
+      } else {
+        unmatched++;
+        unmatchedNames.add(`${lastName}, ${firstName}`);
+      }
+    }
+    
+    // Upsert daily_hours
+    let savedDays = 0;
+    for (const [key, hours] of Object.entries(dailySummary)) {
+      const [empId, date] = key.split('-').length > 2 
+        ? [key.substring(0, key.indexOf('-')), key.substring(key.indexOf('-') + 1)]
+        : key.split('-');
+      
+      // Fix: split on first dash only for empId, rest is date
+      const firstDash = key.indexOf('-');
+      const eid = key.substring(0, firstDash);
+      const dt = key.substring(firstDash + 1);
+      
+      await pool.query(
+        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source)
+         VALUES ($1, $2, $3, 'import')
+         ON CONFLICT (employee_id, work_date) DO UPDATE SET hours_worked = $3, source = 'import'`,
+        [parseInt(eid), dt, Math.round(hours * 100) / 100]
+      );
+      savedDays++;
+    }
+    
+    // Build preview data
+    const preview = results.slice(0, 40).map(r => ({
+      name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
+      date: (r['Date']||'').trim(),
+      times: (r['Times']||'').trim().replace(/\n/g, ' | '),
+      breaks: (r['Breaks']||'').trim(),
+      billable: (r['Billable']||'').trim(),
+      hours: parseBillableHours((r['Billable']||'').trim()).toFixed(2)
+    }));
+    
+    res.json({ 
+      imported: totalRows, 
+      matched, 
+      unmatched, 
+      unmatchedNames: [...unmatchedNames],
+      savedDays,
+      preview,
+      payPeriod: getPayPeriod(new Date())
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -783,7 +871,7 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
 // Serve the frontend
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('{*path}', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
 // Start
 initDB().then(() => {
