@@ -471,8 +471,24 @@ async function showApp() {
   document.getElementById('sidebarCenter').textContent = currentUser.center || 'All Centers';
   
   buildNav();
-  await loadPayPeriod();
+  
+  // Use smart default pay period based on role
+  try {
+    payPeriod = await api('/api/pay-period/smart-default');
+  } catch(e) {
+    payPeriod = await api('/api/pay-period');
+  }
+  document.getElementById('payPeriodLabel').textContent = payPeriod.label + ' · Pay Date: ' + new Date(payPeriod.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  
   await loadEmployees();
+  
+  // Default center selection
+  if (currentUser.role === 'director') {
+    selectedCenter = currentUser.center;
+  } else {
+    selectedCenter = 'Peace Boulevard';
+  }
+  
   navigate('dashboard');
 }
 
@@ -1113,35 +1129,187 @@ function changeMonth(dir) {
 // ========================
 async function renderPayroll() {
   const el = document.getElementById('pageContent');
+  const isDirector = currentUser.role === 'director';
+  const isPayroll = ['owner','payroll'].includes(currentUser.role);
+  const center = isDirector ? currentUser.center : selectedCenter;
   
-  let html = `<div class="stats-row">
-    <div class="stat-card gold">
-      <div class="stat-label">Current Pay Period</div>
-      <div class="stat-value" style="font-size:16px">${payPeriod.label}</div>
-      <div class="stat-sub">Pay Date: ${new Date(payPeriod.payDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric'})}</div>
+  // Load workflow status
+  let wfStatus = {};
+  try { wfStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`); } catch(e) {}
+  const periods = wfStatus.periods || {};
+  const sigs = wfStatus.signatures || [];
+  
+  // Pay period navigator
+  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+    <button class="btn btn-outline btn-sm" onclick="navPayPeriod(-1)">◀ Previous</button>
+    <div class="pay-period-badge" style="flex:1;justify-content:center">
+      <div style="text-align:center">
+        <div class="label">Pay Period</div>
+        <div>${payPeriod.label}</div>
+        <div style="font-size:11px;color:var(--gray-600)">Pay Date: ${new Date(payPeriod.payDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</div>
+      </div>
     </div>
+    <button class="btn btn-outline btn-sm" onclick="navPayPeriod(1)">Next ▶</button>
   </div>`;
   
-  html += `<div class="card"><div class="card-header"><h3>Import Playground Timecards (CSV)</h3></div><div class="card-body">
-    <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">Upload the exported CSV from Playground for this pay period. The system will match employees and calculate overtime across Mon-Sun week boundaries.</p>
-    <input type="file" id="timecardFile" accept=".csv" style="margin-bottom:12px">
-    <br><button class="btn btn-primary" onclick="importTimecard()">Upload & Process</button>
-    <div id="importResult" style="margin-top:16px"></div>
-  </div></div>`;
+  if (!isDirector) {
+    html += `<div class="center-tabs">`;
+    ['Peace Boulevard','Niles','Montessori'].forEach(c => {
+      const p = periods[c];
+      const statusIcon = p?.payroll_closed ? '✅' : p?.director_closed ? '📨' : p?.timecards_uploaded ? '📋' : '⏳';
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderPayroll()">${statusIcon} ${c}</div>`;
+    });
+    html += `</div>`;
+  }
   
-  // Show pay period checklist
-  html += `<div class="card"><div class="card-header"><h3>Payroll Checklist</h3></div><div class="card-body">
-    <div style="font-size:13px;line-height:2">
-      <label><input type="checkbox"> Timecards imported from Playground</label><br>
-      <label><input type="checkbox"> Time off entries reviewed (Paid / Unpaid days)</label><br>
-      <label><input type="checkbox"> Overtime calculated across week boundaries</label><br>
-      <label><input type="checkbox"> Pending pay increases addressed</label><br>
-      <label><input type="checkbox"> New hire documents received</label><br>
-      <label><input type="checkbox"> Payroll processed</label>
+  const pp = periods[center] || {};
+  
+  // ---- WORKFLOW STATUS CARD ----
+  html += `<div class="card"><div class="card-header"><h3>Payroll Workflow — ${center}</h3></div><div class="card-body">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.timecards_uploaded?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.timecards_uploaded?'✅':'1️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Timecards</div>
+        ${pp.timecards_signed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timecards_signed_by}</div>` : ''}
+      </div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.timeoff_approved?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.timeoff_approved?'✅':'2️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Time Off</div>
+        ${pp.timeoff_signed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timeoff_signed_by}</div>` : ''}
+      </div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.director_closed?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.director_closed?'✅':'3️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Director Close</div>
+        ${pp.director_closed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.director_closed_by}</div>` : ''}
+      </div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.payroll_closed?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.payroll_closed?'✅':'4️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Payroll Processed</div>
+        ${pp.payroll_closed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.payroll_closed_by}</div>` : ''}
+      </div>
     </div>
   </div></div>`;
   
+  // ---- STEP 1: TIMECARD UPLOAD (Director) ----
+  if (isDirector || isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Step 1: Upload Timecards</h3>
+      ${pp.timecards_uploaded ? '<span class="badge badge-success">Complete</span>' : ''}
+    </div><div class="card-body">`;
+    
+    if (!pp.timecards_uploaded) {
+      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for ${center}.</p>
+        <input type="file" id="timecardFile" accept=".csv" style="margin-bottom:12px"><br>
+        <button class="btn btn-primary" onclick="importTimecard()">Upload & Process</button>
+        <div id="importResult" style="margin-top:16px"></div>
+        
+        <div id="signTimecardSection" style="display:none;margin-top:20px;padding:16px;border:2px solid var(--navy);border-radius:8px;background:rgba(27,42,74,0.03)">
+          <h4 style="font-size:14px;color:var(--navy);margin-bottom:8px">Verify & Sign</h4>
+          <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">I verify that the uploaded timecards have been reviewed and are accurate.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="tcSignName" placeholder="Full name"></div>
+          <button class="btn btn-gold" onclick="signTimecards()">Sign & Submit Timecards</button>
+        </div>`;
+    } else {
+      html += `<div style="background:var(--success-bg);padding:12px;border-radius:8px;font-size:13px;color:var(--success)">
+        ✅ Timecards uploaded and verified by <strong>${pp.timecards_signed_by}</strong> on ${pp.timecards_signed_at ? new Date(pp.timecards_signed_at).toLocaleString() : ''}
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+  
+  // ---- STEP 2: TIME OFF APPROVAL (Director) ----
+  if (isDirector || isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Step 2: Verify Time Off</h3>
+      ${pp.timeoff_approved ? '<span class="badge badge-success">Complete</span>' : ''}
+    </div><div class="card-body">`;
+    
+    if (!pp.timeoff_approved) {
+      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Review all paid and unpaid time off entries for this period. <a href="#" onclick="navigate('timeoff');return false" style="color:var(--navy)">Open Time Off Tracker →</a></p>
+        <div style="padding:16px;border:2px solid var(--navy);border-radius:8px;background:rgba(27,42,74,0.03);margin-top:12px">
+          <h4 style="font-size:14px;color:var(--navy);margin-bottom:8px">Verify & Sign</h4>
+          <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">I verify that all paid and unpaid time off entries for this pay period are accurate.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="toSignName" placeholder="Full name"></div>
+          <button class="btn btn-gold" onclick="signTimeoff()">Sign & Approve Time Off</button>
+        </div>`;
+    } else {
+      html += `<div style="background:var(--success-bg);padding:12px;border-radius:8px;font-size:13px;color:var(--success)">
+        ✅ Time off verified by <strong>${pp.timeoff_signed_by}</strong> on ${pp.timeoff_signed_at ? new Date(pp.timeoff_signed_at).toLocaleString() : ''}
+      </div>`;
+    }
+    html += `</div></div>`;
+  }
+  
+  // ---- STEP 3: DIRECTOR CLOSE OUT ----
+  if (isDirector) {
+    html += `<div class="card"><div class="card-header"><h3>Step 3: Close Out Pay Period</h3>
+      ${pp.director_closed ? '<span class="badge badge-success">Submitted</span>' : ''}
+    </div><div class="card-body">`;
+    
+    if (pp.timecards_uploaded && pp.timeoff_approved && !pp.director_closed) {
+      html += `<div style="padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
+        <h4 style="font-size:14px;color:var(--navy);margin-bottom:8px">Final Certification</h4>
+        <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">I certify that all payroll information for this pay period has been reviewed, verified, and is ready for processing.</p>
+        <div class="form-group"><label>Type your full name to sign</label><input id="closeSignName" placeholder="Full name"></div>
+        <button class="btn btn-primary" onclick="directorClose()">Close Out & Submit to Payroll</button>
+      </div>`;
+    } else if (pp.director_closed) {
+      html += `<div style="background:var(--success-bg);padding:12px;border-radius:8px;font-size:13px;color:var(--success)">
+        ✅ Submitted to payroll by <strong>${pp.director_closed_by}</strong> on ${pp.director_closed_at ? new Date(pp.director_closed_at).toLocaleString() : ''}
+      </div>`;
+    } else {
+      html += `<p style="font-size:13px;color:var(--gray-400)">Complete Steps 1 and 2 before closing out.</p>`;
+    }
+    html += `</div></div>`;
+  }
+  
+  // ---- PAYROLL REPORT (Jared/Mary) ----
+  if (isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Payroll Report — ${center}</h3>
+      <button class="btn btn-primary btn-sm" onclick="loadPayrollReport()">Generate Report</button>
+    </div><div class="card-body"><div id="payrollReportArea"><em style="color:var(--gray-400)">Click "Generate Report" to load.</em></div></div></div>`;
+    
+    // Close out button for Jared
+    if (!pp.payroll_closed) {
+      const allClosed = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.director_closed);
+      html += `<div class="card"><div class="card-header"><h3>Step 4: Process Payroll</h3></div><div class="card-body">`;
+      if (allClosed) {
+        html += `<div style="padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
+          <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">All centers have submitted. Process payroll and close this period.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="payrollCloseSign" placeholder="Full name"></div>
+          <button class="btn btn-success" onclick="closePayroll()">Close Payroll Period</button>
+        </div>`;
+      } else {
+        const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.director_closed);
+        html += `<p style="font-size:13px;color:var(--warning)">⏳ Waiting for director submissions: ${waiting.join(', ')}</p>`;
+      }
+      html += `</div></div>`;
+    }
+  }
+  
+  // Signature log
+  if (sigs.length > 0) {
+    html += `<div class="card"><div class="card-header"><h3>Signature Log</h3></div><div class="card-body">
+      <table class="data-table"><thead><tr><th>Action</th><th>Center</th><th>Signed By</th><th>Date</th></tr></thead><tbody>`;
+    sigs.forEach(s => {
+      const labels = {'timecards_verified':'Timecards Verified','timeoff_verified':'Time Off Approved','director_closeout':'Director Close Out','payroll_processed':'Payroll Processed'};
+      html += `<tr><td>${labels[s.action_type]||s.action_type}</td><td>${s.center||'All'}</td><td><strong>${s.signed_by_name}</strong> (${s.signature_text})</td><td>${new Date(s.created_at).toLocaleString()}</td></tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+  
   el.innerHTML = html;
+}
+
+function navPayPeriod(dir) {
+  const d = new Date(payPeriod.start + 'T12:00:00');
+  d.setDate(d.getDate() + (dir * 16)); // Jump ~half month
+  payPeriod = null; // Will recalculate
+  api(`/api/pay-period?date=${d.toISOString().split('T')[0]}`).then(pp => {
+    payPeriod = pp;
+    document.getElementById('payPeriodLabel').textContent = pp.label + ' · Pay Date: ' + new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    if (currentPage === 'payroll') renderPayroll();
+    else if (currentPage === 'timeoff') renderTimeOff();
+    else if (currentPage === 'timeoff-calendar') renderTimeOffCalendar();
+  });
 }
 
 async function importTimecard() {
@@ -1171,15 +1339,116 @@ async function importTimecard() {
     }
     
     if (result.preview && result.preview.length > 0) {
-      html += `<div class="card" style="margin-top:16px"><div class="card-header"><h3>Import Preview (first 40 rows)</h3></div><div class="card-body"><div class="table-scroll">
-        <table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Times</th><th>Breaks</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
-      result.preview.forEach(r => {
-        html += `<tr><td style="white-space:nowrap"><strong>${r.name}</strong></td><td>${r.date}</td><td style="font-size:11px">${r.times}</td><td style="font-size:11px">${r.breaks}</td><td>${r.billable}</td><td style="font-family:'JetBrains Mono',monospace;font-weight:600">${r.hours}</td></tr>`;
+      html += `<div class="table-scroll" style="margin-top:12px"><table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
+      result.preview.slice(0,20).forEach(r => {
+        html += `<tr><td><strong>${r.name}</strong></td><td>${r.date}</td><td>${r.billable}</td><td style="font-family:'JetBrains Mono',monospace">${r.hours}</td></tr>`;
       });
-      html += `</tbody></table></div></div></div>`;
+      html += `</tbody></table></div>`;
     }
     
     resultEl.innerHTML = html;
+    // Show sign section
+    const signSection = document.getElementById('signTimecardSection');
+    if (signSection) signSection.style.display = 'block';
+  }
+}
+
+async function signTimecards() {
+  const name = document.getElementById('tcSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  await api('/api/payroll-workflow/sign-timecards', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center, signature_name: name } });
+  renderPayroll();
+}
+
+async function signTimeoff() {
+  const name = document.getElementById('toSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  await api('/api/payroll-workflow/sign-timeoff', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center, signature_name: name } });
+  renderPayroll();
+}
+
+async function directorClose() {
+  const name = document.getElementById('closeSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  if (!confirm('Are you sure you want to close out this pay period? This cannot be undone.')) return;
+  await api('/api/payroll-workflow/director-close', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center: currentUser.center, signature_name: name } });
+  renderPayroll();
+}
+
+async function closePayroll() {
+  const name = document.getElementById('payrollCloseSign').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  if (!confirm('Close payroll for ALL centers for this period?')) return;
+  await api('/api/payroll-workflow/payroll-close', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, signature_name: name } });
+  renderPayroll();
+}
+
+async function loadPayrollReport() {
+  const area = document.getElementById('payrollReportArea');
+  area.innerHTML = '<em style="color:var(--gray-400)">Generating report...</em>';
+  
+  try {
+    const center = selectedCenter === 'all' ? '' : selectedCenter;
+    const data = await api(`/api/payroll-report?date=${payPeriod.start}&center=${center}`);
+    
+    if (!data.report || data.report.length === 0) {
+      area.innerHTML = '<p style="color:var(--gray-400)">No payroll data for this period. Upload timecards first.</p>';
+      return;
+    }
+    
+    let html = `<div style="font-size:12px;color:var(--gray-600);margin-bottom:12px">
+      <strong>Period:</strong> ${data.payPeriod.label} · <strong>Generated:</strong> ${new Date().toLocaleString()}
+    </div>`;
+    
+    // Group by center
+    const byCenter = {};
+    data.report.forEach(r => {
+      if (!byCenter[r.center]) byCenter[r.center] = [];
+      byCenter[r.center].push(r);
+    });
+    
+    for (const [ctr, emps] of Object.entries(byCenter)) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">${ctr}</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Position</th><th>Rate</th><th>Reg Hrs</th><th>OT Hrs</th><th>Total Hrs</th><th>PTO Days</th><th>Unpaid</th><th>Pay Increases</th>
+      </tr></thead><tbody>`;
+      
+      emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
+      let ctrRegular = 0, ctrOT = 0, ctrTotal = 0;
+      
+      emps.forEach(e => {
+        const hasOT = e.overtimeHours > 0;
+        const hasIncrease = e.payIncreases && e.payIncreases.length > 0;
+        ctrRegular += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
+        
+        html += `<tr>
+          <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+          <td style="font-size:11px">${e.position||''}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;${hasOT?'color:var(--danger);font-weight:700':''}">${hasOT ? e.overtimeHours.toFixed(2) : '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
+          <td>${e.ptoDays > 0 ? '<span class="badge badge-info">'+e.ptoDays+'</span>' : '—'}</td>
+          <td>${e.unpaidDays > 0 ? '<span class="badge badge-danger">'+e.unpaidDays+'</span>' : '—'}</td>
+          <td>${hasIncrease ? e.payIncreases.map(pi=>'$'+parseFloat(pi.current_rate).toFixed(2)+'→$'+parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—'}</td>
+        </tr>`;
+      });
+      
+      html += `<tr style="background:var(--navy);color:white;font-weight:700">
+        <td colspan="3">TOTAL — ${ctr}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrRegular.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrOT.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrTotal.toFixed(2)}</td>
+        <td colspan="3"></td>
+      </tr>`;
+      html += `</tbody></table></div>`;
+    }
+    
+    area.innerHTML = html;
+  } catch(e) {
+    area.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`;
   }
 }
 
@@ -1354,6 +1623,7 @@ async function uploadDoc() {
 // ========================
 async function renderStaffingPlan() {
   const el = document.getElementById('pageContent');
+  const canEdit = ['owner','hr','director'].includes(currentUser.role);
   
   let html = `<div class="center-tabs">`;
   if (currentUser.role !== 'director') {
@@ -1378,61 +1648,262 @@ async function renderStaffingPlan() {
     }
   } catch(e) {}
   
-  html += `<div class="card"><div class="card-header"><h3>Staffing Plan — ${center}</h3>
-    <div style="font-size:11px;color:var(--gray-400)">License #DC110415511 · Mary Wardlaw, Licensee</div>
+  // Load staffing plan data from DB
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  
+  // Filter to this center and deduplicate by employee_id (keep first occurrence)
+  const seen = new Set();
+  const centerData = spData.filter(s => {
+    if (s.center !== center) return false;
+    if (seen.has(s.employee_id)) return false;
+    seen.add(s.employee_id);
+    return true;
+  });
+  
+  // Group by classroom
+  const classroomMap = {};
+  centerData.forEach(s => {
+    if (!classroomMap[s.classroom]) classroomMap[s.classroom] = [];
+    classroomMap[s.classroom].push(s);
+  });
+  
+  // Get classroom order from template
+  const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const orderedClassrooms = template.map(t => t.section);
+  // Add any classrooms from data not in template
+  Object.keys(classroomMap).forEach(c => {
+    if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
+  });
+  
+  html += `<div class="card"><div class="card-header">
+    <h3>Staffing Plan — ${center}</h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div style="font-size:11px;color:var(--gray-400)">License #DC110415511 · Mary Wardlaw, Licensee</div>
+      ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="showAddStaffingEntry('${center}')">+ Add Staff</button>` : ''}
+    </div>
   </div><div class="card-body"><div class="table-scroll">
     <table class="data-table" style="font-size:11px">
       <thead><tr>
         <th>Classroom</th><th>Role</th><th>Name</th><th>Start Date</th><th>Schedule</th>
         <th>Orientation</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Refresh</th>
         <th>CCBC</th><th>Fingerprint</th><th>Eligible</th><th>Abuse/Neglect</th>
-        <th>Last Eval</th><th>Promoted Lead</th><th>Room Assigned</th>
+        <th>Last Eval</th><th>Promoted</th><th>Room Assgn</th>
         <th>Education</th><th>Hours/CEUs</th><th>I/T Training</th>
+        ${canEdit ? '<th>Actions</th>' : ''}
       </tr></thead><tbody>`;
   
-  // Load staffing plan data
-  let spData = [];
-  try { spData = await api('/api/staffing-plan'); } catch(e) {}
-  
-  // If no data, show the template structure
-  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
-  
-  classrooms.forEach(cls => {
-    html += `<tr style="background:var(--navy);color:white"><td colspan="19" style="padding:8px 14px;font-weight:700">${cls.section}</td></tr>`;
-    cls.roles.forEach(role => {
-      const match = spData.find(s => s.center === center && s.classroom === cls.section && s.role_in_room === role);
+  orderedClassrooms.forEach(classroom => {
+    const staff = classroomMap[classroom] || [];
+    html += `<tr style="background:var(--navy);color:white">
+      <td colspan="${canEdit ? 20 : 19}" style="padding:8px 14px;font-weight:700">${classroom}</td>
+    </tr>`;
+    
+    if (staff.length === 0) {
+      html += `<tr><td colspan="${canEdit ? 20 : 19}" style="color:var(--gray-300);font-style:italic;padding-left:30px">No staff assigned</td></tr>`;
+    }
+    
+    staff.forEach(s => {
       html += `<tr>
         <td></td>
-        <td><strong>${role}</strong></td>
-        <td>${match ? `${match.first_name || ''} ${match.last_name || ''}` : '<em style="color:var(--gray-300)">—</em>'}</td>
-        <td>${match?.emp_start_date ? new Date(match.emp_start_date).toLocaleDateString('en-US',{month:'numeric',day:'numeric',year:'2-digit'}) : ''}</td>
-        <td style="font-size:10px">${match?.emp_schedule || ''}</td>
-        <td>${fmtDate(match?.orientation_date)}</td>
-        <td>${fmtDate(match?.cpr_first_aid_date)}</td>
-        <td>${fmtDate(match?.health_safety_abc_date)}</td>
-        <td>${fmtDate(match?.health_safety_refresher)}</td>
-        <td>${fmtDate(match?.ccbc_consent_date)}</td>
-        <td>${fmtDate(match?.fingerprinting_date)}</td>
-        <td>${fmtDate(match?.date_eligible)}</td>
-        <td>${fmtDate(match?.abuse_neglect_statement)}</td>
-        <td>${fmtDate(match?.last_evaluation)}</td>
-        <td>${fmtDate(match?.date_promoted_lead)}</td>
-        <td>${fmtDate(match?.date_assigned_room)}</td>
-        <td style="font-size:10px">${match?.education || ''}</td>
-        <td style="font-size:10px">${match?.semester_hours || ''}</td>
-        <td style="font-size:10px">${match?.infant_toddler_training || ''}</td>
+        <td><strong>${s.role_in_room || ''}</strong></td>
+        <td style="white-space:nowrap">${s.first_name || ''} ${s.last_name || ''}</td>
+        <td>${fmtDate(s.emp_start_date)}</td>
+        <td style="font-size:10px">${s.emp_schedule || ''}</td>
+        <td>${fmtDate(s.orientation_date)}</td>
+        <td>${fmtDate(s.cpr_first_aid_date)}</td>
+        <td>${fmtDate(s.health_safety_abc_date)}</td>
+        <td>${fmtDate(s.health_safety_refresher)}</td>
+        <td>${fmtDate(s.ccbc_consent_date)}</td>
+        <td>${fmtDate(s.fingerprinting_date)}</td>
+        <td>${fmtDate(s.date_eligible)}</td>
+        <td>${fmtDate(s.abuse_neglect_statement)}</td>
+        <td>${fmtDate(s.last_evaluation)}</td>
+        <td>${fmtDate(s.date_promoted_lead)}</td>
+        <td>${fmtDate(s.date_assigned_room)}</td>
+        <td style="font-size:10px">${s.education || ''}</td>
+        <td style="font-size:10px">${s.semester_hours || ''}</td>
+        <td style="font-size:10px">${s.infant_toddler_training || ''}</td>
+        ${canEdit ? `<td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="editStaffingEntry(${s.id})" title="Edit">✏️</button>
+          <button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove" style="color:var(--danger)">✕</button>
+        </td>` : ''}
       </tr>`;
     });
   });
+  
+  // Show empty template slots for classrooms with no data
+  const templateOnly = template.filter(t => !classroomMap[t.section] || classroomMap[t.section].length === 0);
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
 }
 
+function showAddStaffingEntry(center) {
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  let html = `<div class="modal-header"><h3>Add Staff to Staffing Plan</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Employee</label><select id="spEmployee">
+          <option value="">Select employee...</option>
+          ${employees.filter(e => e.center === center || ['owner','hr'].includes(currentUser.role)).map(e => `<option value="${e.id}">${e.last_name}, ${e.first_name} (${e.center})</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="spRole">
+          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+        </select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Classroom</label>
+          <select id="spClassroom">
+            ${classrooms.map(c => `<option value="${c.section}">${c.section}</option>`).join('')}
+            <option value="__custom">— Custom classroom —</option>
+          </select>
+        </div>
+        <div class="form-group" id="spCustomClassroomGroup" style="display:none"><label>Custom Classroom Name</label><input id="spCustomClassroom"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveStaffingEntry('${center}')">Add to Staffing Plan</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  
+  document.getElementById('spClassroom').addEventListener('change', function() {
+    document.getElementById('spCustomClassroomGroup').style.display = this.value === '__custom' ? 'block' : 'none';
+  });
+}
+
+async function saveStaffingEntry(center) {
+  const empId = document.getElementById('spEmployee').value;
+  if (!empId) return alert('Please select an employee.');
+  let classroom = document.getElementById('spClassroom').value;
+  if (classroom === '__custom') classroom = document.getElementById('spCustomClassroom').value;
+  if (!classroom) return alert('Please select or enter a classroom.');
+  const role = document.getElementById('spRole').value;
+  
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: parseInt(empId), center, classroom, role_in_room: role,
+      orientation_date:null, cpr_first_aid_date:null, health_safety_abc_date:null, health_safety_refresher:null,
+      ccbc_consent_date:null, fingerprinting_date:null, date_eligible:null, abuse_neglect_statement:null,
+      last_evaluation:null, date_promoted_lead:null, date_assigned_room:null, education:null, semester_hours:null, infant_toddler_training:null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function editStaffingEntry(spId) {
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  const entry = spData.find(s => s.id === spId);
+  if (!entry) return alert('Entry not found');
+  
+  const center = entry.center;
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  
+  let html = `<div class="modal-header"><h3>Edit Staffing Entry</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:14px;font-weight:600;margin-bottom:16px">${entry.first_name} ${entry.last_name}</p>
+      <div class="form-row">
+        <div class="form-group"><label>Role</label><select id="spEditRole">
+          ${['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub'].map(r => `<option${r===entry.role_in_room?' selected':''}>${r}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Classroom</label>
+          <input id="spEditClassroom" value="${entry.classroom}" list="classroomList">
+          <datalist id="classroomList">${classrooms.map(c => `<option value="${c.section}">`).join('')}</datalist>
+        </div>
+      </div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Compliance Dates</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Orientation</label><input type="date" id="spOri" value="${datVal(entry.orientation_date)}"></div>
+        <div class="form-group"><label>CPR/First Aid</label><input type="date" id="spCpr" value="${datVal(entry.cpr_first_aid_date)}"></div>
+        <div class="form-group"><label>H&S ABC</label><input type="date" id="spAbc" value="${datVal(entry.health_safety_abc_date)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>H&S Refresher</label><input type="date" id="spRef" value="${datVal(entry.health_safety_refresher)}"></div>
+        <div class="form-group"><label>CCBC Consent</label><input type="date" id="spCcbc" value="${datVal(entry.ccbc_consent_date)}"></div>
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="spFp" value="${datVal(entry.fingerprinting_date)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="spElig" value="${datVal(entry.date_eligible)}"></div>
+        <div class="form-group"><label>Abuse/Neglect</label><input type="date" id="spAbuse" value="${datVal(entry.abuse_neglect_statement)}"></div>
+        <div class="form-group"><label>Last Evaluation</label><input type="date" id="spEval" value="${datVal(entry.last_evaluation)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Promoted to Lead</label><input type="date" id="spProm" value="${datVal(entry.date_promoted_lead)}"></div>
+        <div class="form-group"><label>Room Assigned</label><input type="date" id="spAssign" value="${datVal(entry.date_assigned_room)}"></div>
+        <div class="form-group"></div>
+      </div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Education & Training</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Education</label><input id="spEdu" value="${entry.education||''}"></div>
+        <div class="form-group"><label>Hours/CEUs</label><input id="spHrs" value="${entry.semester_hours||''}"></div>
+        <div class="form-group"><label>I/T Training</label><input id="spIT" value="${entry.infant_toddler_training||''}"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateStaffingEntry(${spId},'${center}')">Save Changes</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+function datVal(d) {
+  if (!d) return '';
+  const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d);
+  const match = s.match(/(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
+}
+
+async function updateStaffingEntry(spId, center) {
+  try {
+    // Get the current entry to preserve employee_id
+    let spData = await api('/api/staffing-plan');
+    const entry = spData.find(s => s.id === spId);
+    
+    await api(`/api/staffing-plan/${spId}`, { method: 'PUT', body: {
+      employee_id: entry.employee_id, center,
+      classroom: document.getElementById('spEditClassroom').value,
+      role_in_room: document.getElementById('spEditRole').value,
+      orientation_date: document.getElementById('spOri').value || null,
+      cpr_first_aid_date: document.getElementById('spCpr').value || null,
+      health_safety_abc_date: document.getElementById('spAbc').value || null,
+      health_safety_refresher: document.getElementById('spRef').value || null,
+      ccbc_consent_date: document.getElementById('spCcbc').value || null,
+      fingerprinting_date: document.getElementById('spFp').value || null,
+      date_eligible: document.getElementById('spElig').value || null,
+      abuse_neglect_statement: document.getElementById('spAbuse').value || null,
+      last_evaluation: document.getElementById('spEval').value || null,
+      date_promoted_lead: document.getElementById('spProm').value || null,
+      date_assigned_room: document.getElementById('spAssign').value || null,
+      education: document.getElementById('spEdu').value || null,
+      semester_hours: document.getElementById('spHrs').value || null,
+      infant_toddler_training: document.getElementById('spIT').value || null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function removeStaffingEntry(spId) {
+  if (!confirm('Remove this staff member from the staffing plan? Their employee data will be preserved.')) return;
+  try {
+    await api(`/api/staffing-plan/${spId}`, { method: 'DELETE' });
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 function fmtDate(d) {
   if (!d) return '';
-  const dt = new Date(d + 'T12:00:00');
-  return dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric', year: '2-digit' });
+  // Handle both ISO strings and date objects
+  const s = typeof d === 'string' ? d : String(d);
+  const match = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return '';
+  const [_, y, m, day] = match;
+  return `${parseInt(m)}/${parseInt(day)}/${y.slice(2)}`;
 }
 
 // ========================
