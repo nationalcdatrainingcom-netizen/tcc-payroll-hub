@@ -771,34 +771,52 @@ async function showEmployeeDetail(id) {
     </div>
     
     <h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">PTO Balance — ${new Date().getFullYear()}</h4>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:20px">
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px">
+      <div style="background:var(--gray-100);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--gray-600);text-transform:uppercase">Carryover</div>
+        <div style="font-size:18px;font-weight:700;color:var(--gray-800)">${emp.pto.carryoverHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs</div>
+      </div>
       <div style="background:var(--info-bg);padding:12px;border-radius:8px;text-align:center">
-        <div style="font-size:10px;font-weight:600;color:var(--info);text-transform:uppercase">Earned</div>
-        <div style="font-size:22px;font-weight:700;color:var(--info)">${emp.pto.totalDays}</div>
-        <div style="font-size:10px;color:var(--gray-600)">days</div>
+        <div style="font-size:9px;font-weight:600;color:var(--info);text-transform:uppercase">Accrued</div>
+        <div style="font-size:18px;font-weight:700;color:var(--info)">${emp.pto.accruedHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">of 80 hrs max</div>
+      </div>
+      <div style="background:var(--gold-pale);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--gold);text-transform:uppercase">Tenure Bonus</div>
+        <div style="font-size:18px;font-weight:700;color:var(--navy)">${emp.pto.tenureBonusDays}</div>
+        <div style="font-size:10px;color:var(--gray-400)">days (${emp.pto.tenureBonusHours}h)</div>
       </div>
       <div style="background:var(--warning-bg);padding:12px;border-radius:8px;text-align:center">
-        <div style="font-size:10px;font-weight:600;color:var(--warning);text-transform:uppercase">Used</div>
-        <div style="font-size:22px;font-weight:700;color:var(--warning)">${emp.ptoDaysUsed}</div>
-        <div style="font-size:10px;color:var(--gray-600)">days</div>
+        <div style="font-size:9px;font-weight:600;color:var(--warning);text-transform:uppercase">Used</div>
+        <div style="font-size:18px;font-weight:700;color:var(--warning)">${emp.pto.hoursUsed}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs (${emp.pto.daysUsed} days)</div>
       </div>
-      <div style="background:var(--success-bg);padding:12px;border-radius:8px;text-align:center">
-        <div style="font-size:10px;font-weight:600;color:var(--success);text-transform:uppercase">Remaining</div>
-        <div style="font-size:22px;font-weight:700;color:var(--success)">${emp.ptoDaysRemaining}</div>
-        <div style="font-size:10px;color:var(--gray-600)">days</div>
-      </div>
-      <div style="background:${emp.unpaidWarning ? 'var(--danger-bg)' : 'var(--gray-100)'};padding:12px;border-radius:8px;text-align:center">
-        <div style="font-size:10px;font-weight:600;color:${emp.unpaidWarning ? 'var(--danger)' : 'var(--gray-600)'};text-transform:uppercase">Unpaid (6mo)</div>
-        <div style="font-size:22px;font-weight:700;color:${emp.unpaidWarning ? 'var(--danger)' : 'var(--gray-800)'}">${emp.unpaidLast6Months}</div>
-        <div style="font-size:10px;color:${emp.unpaidWarning ? 'var(--danger)' : 'var(--gray-600)'}">${emp.unpaidWarning ? '⚠️ Over 5!' : 'of 5 max'}</div>
+      <div style="background:${emp.pto.remainingHours <= 0 ? 'var(--danger-bg)' : 'var(--success-bg)'};padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:${emp.pto.remainingHours <= 0 ? 'var(--danger)' : 'var(--success)'};text-transform:uppercase">Remaining</div>
+        <div style="font-size:18px;font-weight:700;color:${emp.pto.remainingHours <= 0 ? 'var(--danger)' : 'var(--success)'}">${emp.pto.remainingHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs (${emp.pto.remainingDays} days)</div>
       </div>
     </div>
-    <div style="font-size:11px;color:var(--gray-600);margin-bottom:16px">
-      Base: ${emp.pto.baseDays} days (80hrs accrual) + ${emp.pto.additionalDays} additional days (${emp.pto.hoursPerDay}hrs each) = <strong>${emp.pto.totalDays} total days</strong>
-      ${emp.pto.additionalDays > 0 ? `<br>Additional hours: ${emp.pto.additionalHours.toFixed(0)} hrs` : ''}
-    </div>`;
+    
+    <div style="font-size:11px;color:var(--gray-600);margin-bottom:8px;line-height:1.6">
+      <strong>How this is calculated:</strong><br>
+      Hours worked YTD: <strong>${emp.pto.totalHoursWorked}</strong> ÷ 20 = <strong>${emp.pto.accruedHours} hrs</strong> accrued (cap: 80 hrs)<br>
+      ${emp.pto.tenureBonusDays > 0 ? `Tenure bonus (${emp.pto.yearsEmployed} yrs): <strong>${emp.pto.tenureBonusDays} days</strong> (${emp.pto.tenureBonusHours} hrs at ${emp.pto.hoursPerDay}h/day)<br>` : ''}
+      ${emp.pto.carryoverHours > 0 ? `2025 carryover: <strong>${emp.pto.carryoverHours} hrs</strong><br>` : ''}
+      Total available: <strong>${emp.pto.totalAvailableHours} hrs</strong> (${emp.pto.totalAvailableDays} days)
+    </div>
+    
+    ${emp.pto.unpaidWarning ? `<div style="background:var(--danger-bg);padding:8px 12px;border-radius:6px;font-size:12px;color:var(--danger);font-weight:600;margin-bottom:12px">⚠️ ${emp.pto.unpaidLast6Months} unpaid days in last 6 months — exceeds 5 day limit</div>` : 
+      `<div style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Unpaid days (last 6 months): ${emp.pto.unpaidLast6Months} of 5 max</div>`}
+    
+    ${canSeePayRate() ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+      <label style="font-size:11px;font-weight:600;color:var(--gray-600)">2025 Carryover Hours:</label>
+      <input type="number" step="0.5" value="${emp.pto_carryover_hours || 0}" id="carryoverInput" style="width:80px;padding:4px 8px;border:1.5px solid var(--gray-200);border-radius:4px;font-size:13px">
+      <button class="btn btn-outline btn-sm" onclick="saveCarryover(${emp.id})">Save</button>
+    </div>` : ''}`;
   
-  // OT section - show link
+  // OT section
   html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">Overtime Tracking</h4>
     <div id="otSection" style="margin-bottom:20px"><em style="color:var(--gray-400);font-size:13px">Loading overtime data...</em></div>`;
   
@@ -850,6 +868,14 @@ async function showEmployeeDetail(id) {
   
   // Load OT data
   loadOTData(id);
+}
+
+async function saveCarryover(empId) {
+  const hrs = document.getElementById('carryoverInput').value;
+  try {
+    await api(`/api/employees/${empId}/carryover`, { method: 'POST', body: { carryover_hours: parseFloat(hrs) || 0 } });
+    showEmployeeDetail(empId); // Refresh
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 async function loadOTData(empId) {
