@@ -641,26 +641,68 @@ async function renderDashboard() {
     html += `</tbody></table></div></div>`;
   }
   
-  // Employees with warnings (unpaid > 5 in 6 months would show here, PTO nearly exhausted, etc.)
-  html += `<div class="card"><div class="card-header"><h3>PTO Summary — Current Year</h3></div><div class="card-body">
-    <table class="data-table"><thead><tr><th>Name</th><th>Center</th><th>Year Hired</th><th>Total PTO Days</th><th>Used</th><th>Remaining</th></tr></thead><tbody>`;
-  
-  const filtered = currentUser.role === 'director' ? employees.filter(e => e.center === currentUser.center) : employees;
-  filtered.slice(0, 20).forEach(e => {
-    html += `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
-      <td><strong>${e.last_name}, ${e.first_name}</strong></td>
-      <td>${e.center}</td>
-      <td>${e.year_hired}</td>
-      <td>${e.pto.totalDays}</td>
-      <td>—</td>
-      <td>—</td>
-    </tr>`;
-  });
-  html += `</tbody></table>
-    <div style="font-size:12px;color:var(--gray-400);margin-top:10px">Click an employee to see full PTO detail. "Used" and "Remaining" appear in employee detail view.</div>
+  // PTO Summary - load actual accrual data
+  html += `<div class="card"><div class="card-header"><h3>PTO Summary — Current Year</h3>
+    <button class="btn btn-outline btn-sm" onclick="loadPTOSummary()">Refresh</button>
+  </div><div class="card-body">
+    <div id="ptoSummaryArea"><em style="color:var(--gray-400)">Loading PTO data...</em></div>
   </div></div>`;
   
   el.innerHTML = html;
+  loadPTOSummary();
+}
+
+async function loadPTOSummary() {
+  const area = document.getElementById('ptoSummaryArea');
+  if (!area) return;
+  
+  try {
+    const filtered = currentUser.role === 'director' 
+      ? employees.filter(e => e.center === currentUser.center) 
+      : employees;
+    
+    // Load detail for each employee to get actual PTO
+    const details = [];
+    for (const e of filtered.slice(0, 50)) {
+      try {
+        const d = await api(`/api/employees/${e.id}/detail`);
+        details.push(d);
+      } catch(err) { /* skip inaccessible */ }
+    }
+    
+    let html = `<table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>Accrued</th><th>Bonus</th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
+    </tr></thead><tbody>`;
+    
+    details.sort((a,b) => a.last_name.localeCompare(b.last_name));
+    
+    details.forEach(e => {
+      const p = e.pto || {};
+      const warn = (p.remainingHours || 0) <= 0;
+      const unpaidWarn = p.unpaidWarning;
+      html += `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
+        <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+        <td>${e.center}</td>
+        <td>${p.yearsEmployed || 0}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${(p.totalHoursWorked||0).toFixed(1)}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${(p.accruedHours||0).toFixed(1)}h</td>
+        <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
+        <td style="font-weight:600">${(p.totalAvailableHours||0).toFixed(1)}h</td>
+        <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)</td>
+        <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${(p.remainingHours||0).toFixed(1)}h</td>
+        <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months} ⚠️</span>` : (p.unpaidLast6Months||0)}</td>
+      </tr>`;
+    });
+    
+    html += `</tbody></table>
+      <div style="font-size:11px;color:var(--gray-400);margin-top:8px">
+        Accrued = Hours Worked ÷ 20 (cap 80h) · Bonus = tenure days per policy · Click name for full detail
+      </div>`;
+    
+    area.innerHTML = html;
+  } catch(e) {
+    area.innerHTML = `<div style="color:var(--danger)">Error loading PTO data: ${e.message}</div>`;
+  }
 }
 
 // ========================
