@@ -670,33 +670,48 @@ async function loadPTOSummary() {
       } catch(err) { /* skip inaccessible */ }
     }
     
-    let html = `<table class="data-table"><thead><tr>
-      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>Accrued</th><th>Bonus</th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
+    let html = `<div style="font-size:11px;color:var(--gray-600);background:var(--gold-pale);padding:10px 14px;border-radius:6px;margin-bottom:12px;line-height:1.6">
+        <strong>How PTO is calculated:</strong> Every employee earns <strong>1 hour of PTO for every 20 hours worked</strong> (max 80 hours/year). 
+        Full-time staff (35+ hrs/wk) also receive <strong>tenure bonus days</strong> per the policy chart (1-4 extra days for years 1-4, jumps to 11+ at year 5). 
+        Hours worked updates each time a Playground timecard CSV is uploaded.
+      </div>
+      <table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>PTO Accrued<br><small>(hrs÷20)</small></th><th>Tenure Days<br><small>(policy chart)</small></th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
     </tr></thead><tbody>`;
     
     details.sort((a,b) => a.last_name.localeCompare(b.last_name));
     
     details.forEach(e => {
       const p = e.pto || {};
-      const warn = (p.remainingHours || 0) <= 0;
+      const noHoursData = (p.totalHoursWorked || 0) === 0;
+      const warn = (p.remainingHours || 0) <= 0 && !noHoursData;
       const unpaidWarn = p.unpaidWarning;
       html += `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
         <td><strong>${e.last_name}, ${e.first_name}</strong></td>
         <td>${e.center}</td>
         <td>${p.yearsEmployed || 0}</td>
-        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${(p.totalHoursWorked||0).toFixed(1)}</td>
-        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${(p.accruedHours||0).toFixed(1)}h</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.totalHoursWorked||0).toFixed(1)}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.accruedHours||0).toFixed(1)+'h'}</td>
         <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
-        <td style="font-weight:600">${(p.totalAvailableHours||0).toFixed(1)}h</td>
+        <td style="font-weight:600">${noHoursData ? '<span style="color:var(--gray-300)">pending</span>' : (p.totalAvailableHours||0).toFixed(1)+'h'}</td>
         <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)</td>
-        <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${(p.remainingHours||0).toFixed(1)}h</td>
+        <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.remainingHours||0).toFixed(1)+'h'}</td>
         <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months} ⚠️</span>` : (p.unpaidLast6Months||0)}</td>
       </tr>`;
     });
     
-    html += `</tbody></table>
-      <div style="font-size:11px;color:var(--gray-400);margin-top:8px">
-        Accrued = Hours Worked ÷ 20 (cap 80h) · Bonus = tenure days per policy · Click name for full detail
+    html += `</tbody></table>`;
+    
+    const anyMissingHours = details.some(e => (e.pto?.totalHoursWorked || 0) === 0);
+    if (anyMissingHours) {
+      html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:6px;padding:10px 14px;margin-top:12px;font-size:12px;color:var(--warning)">
+        ⚠️ <strong>Some employees show 0 hours worked.</strong> To populate hours data, run <code>node import-ytd-hours.js</code> from the Render shell, 
+        or upload Playground "Daily Staff Hours" CSVs through the Payroll Processing screen. PTO accrual cannot calculate without hours worked data.
+      </div>`;
+    }
+    
+    html += `<div style="font-size:11px;color:var(--gray-400);margin-top:8px">
+        Click any name for full PTO detail with carryover entry
       </div>`;
     
     area.innerHTML = html;
