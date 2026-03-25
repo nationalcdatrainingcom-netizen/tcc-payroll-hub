@@ -776,7 +776,10 @@ async function renderEmployees() {
       <td><span class="badge ${e.is_full_time ? 'badge-success' : 'badge-info'}">${e.is_full_time ? 'FT' : 'PT'}</span></td>
       <td>${e.pto.totalMaxDays}</td>
       ${showRate ? `<td style="font-family:'JetBrains Mono',monospace;font-size:12px">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>` : ''}
-      <td><button class="btn btn-outline btn-sm" onclick="showEmployeeDetail(${e.id})">View</button></td>
+      <td style="white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="showEmployeeDetail(${e.id})">View</button>
+        ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="showEditEmployee(${e.id})">✏️</button>` : ''}
+      </td>
     </tr>`;
   });
   
@@ -786,6 +789,73 @@ async function renderEmployees() {
 
 function canSeePayRate() {
   return ['owner','payroll','hr'].includes(currentUser.role);
+}
+
+function showEditEmployee(empId) {
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  const showRate = canSeePayRate();
+  
+  let html = `<div class="modal-header"><h3>Edit Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>First Name</label><input id="editFirst" value="${emp.first_name}"></div>
+        <div class="form-group"><label>Last Name</label><input id="editLast" value="${emp.last_name}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Center</label><select id="editCenter">
+          ${CENTERS.map(c=>`<option value="${c}"${c===emp.center?' selected':''}>${c}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Classroom</label><input id="editClassroom" value="${emp.classroom||''}" placeholder="e.g. Twos - Bears"></div>
+        <div class="form-group"><label>Position / Role</label><input id="editPosition" value="${emp.position||''}" placeholder="e.g. Lead, Assistant"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Year Hired</label><input id="editYearHired" type="number" value="${emp.year_hired}"></div>
+        <div class="form-group"><label>Start Date</label><input id="editStartDate" type="date" value="${emp.start_date ? emp.start_date.split('T')[0] : ''}"></div>
+        <div class="form-group"><label>Schedule (M-F)</label><input id="editSchedule" value="${emp.scheduled_times||''}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Weekly Hours</label><input id="editWeeklyHrs" type="number" value="${emp.weekly_hours||40}"></div>
+        <div class="form-group"><label>Full-Time?</label><select id="editFT">
+          <option value="true"${emp.is_full_time?' selected':''}>Full-Time (35+ hrs)</option>
+          <option value="false"${!emp.is_full_time?' selected':''}>Part-Time</option>
+        </select></div>
+        ${showRate ? `<div class="form-group"><label>Hourly Rate</label><input id="editRate" type="number" step="0.01" value="${emp.hourly_rate||''}"></div>` : '<div></div>'}
+      </div>
+      <div class="form-group"><label><input type="checkbox" id="editAdmin"${emp.is_admin?' checked':''}> Administrator / Senior Staff</label></div>
+      <div class="form-group"><label><input type="checkbox" id="editActive"${emp.is_active !== false?' checked':''}> Active Employee</label></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEditEmployee(${empId})">Save Changes</button>
+    </div>`;
+  
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function saveEditEmployee(empId) {
+  try {
+    const body = {
+      first_name: document.getElementById('editFirst').value,
+      last_name: document.getElementById('editLast').value,
+      center: document.getElementById('editCenter').value,
+      classroom: document.getElementById('editClassroom').value || null,
+      position: document.getElementById('editPosition').value || null,
+      year_hired: parseInt(document.getElementById('editYearHired').value),
+      start_date: document.getElementById('editStartDate').value || null,
+      scheduled_times: document.getElementById('editSchedule').value || null,
+      weekly_hours: parseFloat(document.getElementById('editWeeklyHrs').value) || 40,
+      is_full_time: document.getElementById('editFT').value === 'true',
+      hourly_rate: document.getElementById('editRate')?.value ? parseFloat(document.getElementById('editRate').value) : null,
+      is_admin: document.getElementById('editAdmin').checked,
+      is_active: document.getElementById('editActive').checked,
+    };
+    await api(`/api/employees/${empId}`, { method: 'PUT', body });
+    closeModal();
+    await loadEmployees();
+    renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ========================
