@@ -1806,7 +1806,7 @@ async function renderStaffingPlan() {
   let spData = [];
   try { spData = await api('/api/staffing-plan'); } catch(e) {}
   
-  // Filter to this center and deduplicate by employee_id (keep first occurrence)
+  // Filter to this center and deduplicate
   const seen = new Set();
   const centerData = spData.filter(s => {
     if (s.center !== center) return false;
@@ -1815,6 +1815,11 @@ async function renderStaffingPlan() {
     return true;
   });
   
+  // Find unassigned staff — employees at this center not in the staffing plan
+  const assignedIds = new Set(centerData.map(s => s.employee_id));
+  const centerEmployees = employees.filter(e => e.center === center);
+  const unassigned = centerEmployees.filter(e => !assignedIds.has(e.id));
+  
   // Group by classroom
   const classroomMap = {};
   centerData.forEach(s => {
@@ -1822,14 +1827,34 @@ async function renderStaffingPlan() {
     classroomMap[s.classroom].push(s);
   });
   
-  // Get classroom order from template
   const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
   const orderedClassrooms = template.map(t => t.section);
-  // Add any classrooms from data not in template
   Object.keys(classroomMap).forEach(c => {
     if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
   });
   
+  // ---- UNASSIGNED STAFF SECTION ----
+  if (canEdit && unassigned.length > 0) {
+    html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
+      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3>
+        <div style="font-size:11px;color:var(--gray-400)">Drag staff to a classroom below, or click Assign</div>
+      </div><div class="card-body">
+      <div style="display:flex;flex-wrap:wrap;gap:8px" id="unassignedPool">`;
+    
+    unassigned.forEach(e => {
+      html += `<div class="unassigned-chip" draggable="true" data-emp-id="${e.id}" data-emp-name="${e.last_name}, ${e.first_name}"
+        ondragstart="dragStaff(event,${e.id},'${e.first_name.replace(/'/g,"\\'")}','${e.last_name.replace(/'/g,"\\'")}')"
+        style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600;cursor:grab;user-select:none">
+        <span>👤</span> ${e.last_name}, ${e.first_name}
+        <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
+        <button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign</button>
+      </div>`;
+    });
+    
+    html += `</div></div></div>`;
+  }
+  
+  // ---- STAFFING PLAN TABLE ----
   html += `<div class="card"><div class="card-header">
     <h3>Staffing Plan — ${center}</h3>
     <div style="display:flex;gap:8px;align-items:center">
@@ -1850,12 +1875,16 @@ async function renderStaffingPlan() {
   
   orderedClassrooms.forEach(classroom => {
     const staff = classroomMap[classroom] || [];
-    html += `<tr style="background:var(--navy);color:white">
-      <td colspan="${canEdit ? 20 : 19}" style="padding:8px 14px;font-weight:700">${classroom}</td>
+    const colSpan = canEdit ? 20 : 19;
+    html += `<tr style="background:var(--navy);color:white" class="drop-target" data-classroom="${classroom}" data-center="${center}"
+      ondragover="event.preventDefault();this.style.background='var(--gold)'" 
+      ondragleave="this.style.background='var(--navy)'"
+      ondrop="dropStaff(event,'${classroom.replace(/'/g,"\\'")}','${center.replace(/'/g,"\\'")}')" >
+      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">${classroom} ${canEdit ? '<span style="font-size:10px;opacity:0.6">— drop staff here</span>' : ''}</td>
     </tr>`;
     
     if (staff.length === 0) {
-      html += `<tr><td colspan="${canEdit ? 20 : 19}" style="color:var(--gray-300);font-style:italic;padding-left:30px">No staff assigned</td></tr>`;
+      html += `<tr><td colspan="${colSpan}" style="color:var(--gray-300);font-style:italic;padding-left:30px">No staff assigned</td></tr>`;
     }
     
     staff.forEach(s => {
@@ -1887,11 +1916,74 @@ async function renderStaffingPlan() {
     });
   });
   
-  // Show empty template slots for classrooms with no data
-  const templateOnly = template.filter(t => !classroomMap[t.section] || classroomMap[t.section].length === 0);
-  
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
+}
+
+// Drag and drop handlers
+function dragStaff(e, empId, firstName, lastName) {
+  e.dataTransfer.setData('text/plain', JSON.stringify({ empId, firstName, lastName }));
+  e.dataTransfer.effectAllowed = 'move';
+}
+
+async function dropStaff(e, classroom, center) {
+  e.preventDefault();
+  e.currentTarget.style.background = 'var(--navy)';
+  
+  try {
+    const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+    // Ask for role
+    const role = prompt(`Assign ${data.firstName} ${data.lastName} to ${classroom}.\n\nRole (Lead, Co-Lead, Assistant, Caregiver, Floater):`, 'Assistant');
+    if (!role) return;
+    
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: data.empId, center, classroom, role_in_room: role,
+      orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
+      ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
+      last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
+    }});
+    await loadEmployees();
+    renderStaffingPlan();
+  } catch(err) { alert('Error: ' + err.message); }
+}
+
+async function quickAssign(empId, center) {
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const emp = employees.find(e => e.id === empId);
+  
+  let html = `<div class="modal-header"><h3>Assign ${emp?.first_name} ${emp?.last_name}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Classroom</label><select id="qaClassroom">
+          ${classrooms.map(c => `<option value="${c.section}">${c.section}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="qaRole">
+          <option>Assistant</option><option>Lead</option><option>Co-Lead</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doQuickAssign(${empId},'${center.replace(/'/g,"\\'")}')">Assign</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doQuickAssign(empId, center) {
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: empId, center,
+      classroom: document.getElementById('qaClassroom').value,
+      role_in_room: document.getElementById('qaRole').value,
+      orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
+      ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
+      last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
+    }});
+    closeModal();
+    await loadEmployees();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 function showAddStaffingEntry(center) {
