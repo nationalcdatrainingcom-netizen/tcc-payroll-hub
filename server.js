@@ -476,12 +476,33 @@ app.get('/api/pay-period', requireAuth, (req, res) => {
   res.json(getPayPeriod(date));
 });
 
-// Employees hidden from HR view (only visible to owner/payroll and their own director)
-const HR_HIDDEN_NAMES = ['wardlaw_jay','wardlaw_mary','swem_kirsten','wardlaw_kelsey','wardlaw_jared','phillips_shari','fountain_gabrielle'];
+// Employee visibility rules:
+// Owner/Payroll: see everyone
+// Director: see all staff at their center (including themselves), but not admins from other centers
+// HR (Amy): see all non-admin staff + herself, but not owner/payroll/directors
 
-function isHRHidden(emp) {
-  const key = `${emp.last_name.toLowerCase()}_${emp.first_name.toLowerCase()}`;
-  return HR_HIDDEN_NAMES.some(h => key.startsWith(h.split('_')[0]) && key.includes(h.split('_')[1]));
+const ADMIN_HIDDEN_FROM_HR = ['wardlaw_jay','wardlaw_mary','swem_kirsten','wardlaw_kelsey','wardlaw_jared','phillips_shari','fountain_gabrielle'];
+
+function shouldHideFromUser(emp, user) {
+  if (user.role === 'owner' || user.role === 'payroll') return false; // See everyone
+  
+  const empKey = `${emp.last_name.toLowerCase()}_${emp.first_name.toLowerCase()}`;
+  const userKey = `${user.full_name.toLowerCase().split(' ').reverse().join('_')}`;
+  
+  if (user.role === 'hr') {
+    // HR sees herself always
+    if (empKey.includes('gutierrez') && empKey.includes('amy')) return false;
+    // HR cannot see the admin list
+    return ADMIN_HIDDEN_FROM_HR.some(h => empKey.startsWith(h.split('_')[0]) && empKey.includes(h.split('_')[1]));
+  }
+  
+  if (user.role === 'director') {
+    // Directors see everyone at their own center (this is already filtered by the query)
+    // No additional hiding needed — the SQL WHERE center=$1 handles it
+    return false;
+  }
+  
+  return false;
 }
 
 // Employees
@@ -492,6 +513,7 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     let params = [];
     
     if (user.role === 'director') {
+      // Directors see their center's staff — this includes themselves and any admin at their center
       query = 'SELECT * FROM employees WHERE is_active = TRUE AND center = $1 ORDER BY last_name, first_name';
       params = [user.center];
     }
@@ -499,10 +521,8 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     const result = await pool.query(query, params);
     let employees = result.rows;
     
-    // HR: hide admin/owner/director employees
-    if (user.role === 'hr') {
-      employees = employees.filter(e => !isHRHidden(e));
-    }
+    // Apply visibility filtering
+    employees = employees.filter(e => !shouldHideFromUser(e, user));
     
     // Strip pay rate for directors
     if (!canSeePayRate(user)) {
@@ -576,8 +596,8 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
     
-    // HR cannot view hidden admin employees
-    if (user.role === 'hr' && isHRHidden(employee)) {
+    // Check visibility
+    if (shouldHideFromUser(employee, user)) {
       return res.status(403).json({ error: 'Access denied' });
     }
     
@@ -1328,11 +1348,9 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     empQuery += ' ORDER BY center, last_name, first_name';
     const empsResult = await pool.query(empQuery, empParams);
     
-    // Filter out hidden employees for HR
+    // Filter based on user visibility
     let empRows = empsResult.rows;
-    if (req.session.user.role === 'hr') {
-      empRows = empRows.filter(e => !isHRHidden(e));
-    }
+    empRows = empRows.filter(e => !shouldHideFromUser(e, req.session.user));
     
     const report = [];
     
