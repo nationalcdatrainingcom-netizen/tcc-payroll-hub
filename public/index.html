@@ -365,6 +365,7 @@ let pendingIncreases = 0;
 
 const CENTERS = ['Peace Boulevard', 'Niles', 'Montessori'];
 const PEACE_CLASSROOMS = [
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Infants - Caterpillars', roles: ['Co-Lead','Co-Lead'] },
   { section: 'Infants/Toddlers - Butterflies', roles: ['Lead','Assistant'] },
   { section: 'Toddlers - Dolphins', roles: ['Lead','Assistant'] },
@@ -383,6 +384,7 @@ const PEACE_CLASSROOMS = [
 ];
 
 const NILES_CLASSROOMS = [
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Infants/Ones', roles: ['Lead','Assistant','Assistant','Assistant'] },
   { section: 'Ones/Twos', roles: ['Lead','Assistant','Caregiver'] },
   { section: 'Strong Beginnings - Threes', roles: ['Lead','Assistant','Caregiver'] },
@@ -397,6 +399,7 @@ const NILES_CLASSROOMS = [
 ];
 
 const MCC_CLASSROOMS = [
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Toddlers - Purple', roles: ['Lead','Assistant','Assistant'] },
   { section: 'Pre-Primary - Yellow', roles: ['Lead','Assistant','Assistant'] },
   { section: 'Primary - Red', roles: ['Lead','Assistant','Caregiver'] },
@@ -1933,7 +1936,7 @@ async function dropStaff(e, classroom, center) {
   try {
     const data = JSON.parse(e.dataTransfer.getData('text/plain'));
     // Ask for role
-    const role = prompt(`Assign ${data.firstName} ${data.lastName} to ${classroom}.\n\nRole (Lead, Co-Lead, Assistant, Caregiver, Floater):`, 'Assistant');
+    const role = prompt(`Assign ${data.firstName} ${data.lastName} to ${classroom}.\n\nRole (Lead, Co-Lead, Assistant, Caregiver, Floater, Director, Asst. Director, Office, Food Prep):`, 'Assistant');
     if (!role) return;
     
     await api('/api/staffing-plan', { method: 'POST', body: {
@@ -1958,7 +1961,7 @@ async function quickAssign(empId, center) {
           ${classrooms.map(c => `<option value="${c.section}">${c.section}</option>`).join('')}
         </select></div>
         <div class="form-group"><label>Role</label><select id="qaRole">
-          <option>Assistant</option><option>Lead</option><option>Co-Lead</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+          <option>Assistant</option><option>Lead</option><option>Co-Lead</option><option>Caregiver</option><option>Floater</option><option>Sub</option><option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
         </select></div>
       </div>
     </div>
@@ -1996,7 +1999,7 @@ function showAddStaffingEntry(center) {
           ${employees.filter(e => e.center === center || ['owner','hr'].includes(currentUser.role)).map(e => `<option value="${e.id}">${e.last_name}, ${e.first_name} (${e.center})</option>`).join('')}
         </select></div>
         <div class="form-group"><label>Role</label><select id="spRole">
-          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option><option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
         </select></div>
       </div>
       <div class="form-row">
@@ -2055,7 +2058,7 @@ async function editStaffingEntry(spId) {
       <p style="font-size:14px;font-weight:600;margin-bottom:16px">${entry.first_name} ${entry.last_name}</p>
       <div class="form-row">
         <div class="form-group"><label>Role</label><select id="spEditRole">
-          ${['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub'].map(r => `<option${r===entry.role_in_room?' selected':''}>${r}</option>`).join('')}
+          ${['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub','Director','Asst. Director','Office','Food Prep'].map(r => `<option${r===entry.role_in_room?' selected':''}>${r}</option>`).join('')}
         </select></div>
         <div class="form-group"><label>Classroom</label>
           <input id="spEditClassroom" value="${entry.classroom}" list="classroomList">
