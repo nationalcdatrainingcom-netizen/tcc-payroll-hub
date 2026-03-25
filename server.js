@@ -194,6 +194,9 @@ async function initDB() {
 
   // Add carryover column if it doesn't exist (for existing databases)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_carryover_hours NUMERIC(6,2) DEFAULT 0`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_date DATE`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_reason TEXT`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_by VARCHAR(200)`);
 
   // Seed default users if none exist
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
@@ -578,6 +581,50 @@ app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), 
       [parseFloat(carryover_hours) || 0, req.params.id]
     );
     res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Terminate employee (archive - preserve all data)
+app.post('/api/employees/:id/terminate', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
+  try {
+    const { terminated_date, termination_reason } = req.body;
+    const user = req.session.user;
+    const result = await pool.query(
+      `UPDATE employees SET is_active = FALSE, terminated_date = $1, termination_reason = $2, terminated_by = $3 WHERE id = $4 RETURNING *`,
+      [terminated_date, termination_reason, user.full_name, req.params.id]
+    );
+    // Remove from staffing plan
+    await pool.query('DELETE FROM staffing_plan WHERE employee_id = $1', [req.params.id]);
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reinstate terminated employee
+app.post('/api/employees/:id/reinstate', requireRole('owner', 'hr'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `UPDATE employees SET is_active = TRUE, terminated_date = NULL, termination_reason = NULL, terminated_by = NULL WHERE id = $1 RETURNING *`,
+      [req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Archive / terminated employees list
+app.get('/api/employees/archive', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT e.*, 
+        COALESCE((SELECT SUM(dh.hours_worked) FROM daily_hours dh WHERE dh.employee_id = e.id AND EXTRACT(YEAR FROM dh.work_date) = EXTRACT(YEAR FROM NOW())), 0) as ytd_hours
+       FROM employees e WHERE e.is_active = FALSE ORDER BY e.terminated_date DESC NULLS LAST, e.last_name`
+    );
+    res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1341,11 +1388,16 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const center = req.query.center;
     
-    // Get employees
-    let empQuery = 'SELECT * FROM employees WHERE is_active = TRUE';
+    // Get employees - include terminated ones (they show if they have hours in this period)
+    let empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (
+      SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $${center ? 2 : 1} AND dh.work_date <= $${center ? 3 : 2}
+    ))`;
     let empParams = [];
-    if (center) { empQuery += ' AND center = $1'; empParams = [center]; }
-    empQuery += ' ORDER BY center, last_name, first_name';
+    if (center) { empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (
+      SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $2 AND dh.work_date <= $3
+    )) AND e.center = $1`; empParams = [center, pp.start, pp.end]; }
+    else { empParams = [pp.start, pp.end]; }
+    empQuery += ' ORDER BY e.center, e.last_name, e.first_name';
     const empsResult = await pool.query(empQuery, empParams);
     
     // Filter based on user visibility
