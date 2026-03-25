@@ -1112,6 +1112,23 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
 </tr></thead>
 <tbody>${tableRows}</tbody>
 </table>
+<div style="margin-top:12px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #ccc;padding-top:8px">
+  <div style="flex:1">
+    <div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Licensee Signature:</div>
+    ${sigData?.value 
+      ? '<img src="' + sigData.value + '" style="height:30px;margin-bottom:2px"><br><span style="font-size:6pt;color:#999">Digital signature on file</span>'
+      : '<div style="border-bottom:1px solid #333;width:250px;height:25px;margin-bottom:2px"></div><span style="font-size:6pt;color:#999">Sign here</span>'}
+  </div>
+  <div style="text-align:center;flex:1">
+    <div style="font-size:7pt;font-weight:600">Mary Wardlaw, Licensee</div>
+  </div>
+  <div style="text-align:right;flex:1">
+    <div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Date:</div>
+    ${sigData?.value 
+      ? '<span style="font-size:8pt">' + new Date(sigData.updated_at).toLocaleDateString() + '</span>' 
+      : '<div style="border-bottom:1px solid #333;width:150px;height:20px;display:inline-block"></div>'}
+  </div>
+</div>
 <script>window.onload=function(){window.print()}</script>
 </body></html>`;
 
