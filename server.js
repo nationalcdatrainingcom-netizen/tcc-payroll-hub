@@ -61,6 +61,7 @@ async function initDB() {
       hourly_rate NUMERIC(8,2),
       is_active BOOLEAN DEFAULT TRUE,
       is_admin BOOLEAN DEFAULT FALSE,
+      pto_carryover_hours NUMERIC(6,2) DEFAULT 0,
       created_at TIMESTAMP DEFAULT NOW()
     );
 
@@ -191,6 +192,9 @@ async function initDB() {
     );
   `);
 
+  // Add carryover column if it doesn't exist (for existing databases)
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_carryover_hours NUMERIC(6,2) DEFAULT 0`);
+
   // Seed default users if none exist
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
@@ -232,38 +236,129 @@ function canSeePayRate(user) {
 // ========================
 // PTO CALCULATION HELPERS
 // ========================
-function calculatePTOAllowance(yearHired, isFullTime, isAdmin, weeklyHours) {
+
+// Calculates tenure bonus days (Component 2 & 3 from policy) - these are granted, not accrued
+function getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours) {
   const currentYear = new Date().getFullYear();
   const yearsEmployed = currentYear - yearHired;
-  
-  // Base: everyone gets up to 80 hours (10 days) accrual
-  let baseDays = 10;
   let additionalDays = 0;
   
   if (isFullTime && weeklyHours >= 35) {
     if (yearsEmployed >= 5 || isAdmin) {
-      // Senior staff: jump to 11 additional days at year 5
       const effectiveYears = Math.max(yearsEmployed, 5);
       additionalDays = effectiveYears + 6; // year5=11, year6=12, etc.
     } else if (yearsEmployed >= 1) {
-      // Years 1-4: get 1 additional day per year
       additionalDays = yearsEmployed;
     }
   }
   
-  const totalDays = baseDays + additionalDays;
   const hoursPerDay = weeklyHours >= 40 ? 8 : (weeklyHours / 5);
+  return { additionalDays, additionalHours: additionalDays * hoursPerDay, hoursPerDay, yearsEmployed };
+}
+
+// Static PTO info (used for employee list where we don't need DB query per employee)
+function calculatePTOAllowance(yearHired, isFullTime, isAdmin, weeklyHours) {
+  const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
+  return {
+    baseDays: 10,
+    baseHours: 80, // max accrual cap
+    additionalDays: tenure.additionalDays,
+    additionalHours: tenure.additionalHours,
+    totalMaxDays: 10 + tenure.additionalDays,
+    totalMaxHours: 80 + tenure.additionalHours,
+    hoursPerDay: tenure.hoursPerDay,
+    yearsEmployed: tenure.yearsEmployed,
+    carryoverCap: 80
+  };
+}
+
+// Full PTO calculation with actual hours from DB
+async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyHours, carryoverHours) {
+  const currentYear = new Date().getFullYear();
+  const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
+  const hoursPerDay = tenure.hoursPerDay;
+  
+  // Component 1: Accrued PTO from actual hours worked this year
+  const hoursResult = await pool.query(
+    `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours 
+     WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
+    [empId, currentYear]
+  );
+  const totalHoursWorked = parseFloat(hoursResult.rows[0].total_hours);
+  const rawAccruedHours = totalHoursWorked / 20; // 1 hour PTO per 20 hours worked
+  const accruedHours = Math.min(rawAccruedHours, 80); // Capped at 80 hours
+  
+  // Component 2+3: Tenure bonus (granted at start of year)
+  const tenureBonusHours = tenure.additionalHours;
+  
+  // Carryover from previous year (capped at 80 hours)
+  const carryover = Math.min(parseFloat(carryoverHours) || 0, 80);
+  
+  // Total available = carryover + accrued + tenure bonus
+  const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
+  const totalAvailableDays = totalAvailableHours / hoursPerDay;
+  
+  // PTO used this year
+  const usedResult = await pool.query(
+    `SELECT COUNT(*) as days_used FROM time_off_entries 
+     WHERE employee_id = $1 AND entry_type = 'P' AND EXTRACT(YEAR FROM entry_date) = $2`,
+    [empId, currentYear]
+  );
+  const daysUsed = parseInt(usedResult.rows[0].days_used);
+  const hoursUsed = daysUsed * hoursPerDay;
+  
+  // Remaining
+  const remainingHours = Math.max(0, totalAvailableHours - hoursUsed);
+  const remainingDays = remainingHours / hoursPerDay;
+  
+  // Unpaid days last 6 months
+  const sixMonthsAgo = new Date();
+  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
+  const unpaidResult = await pool.query(
+    `SELECT COUNT(*) as count FROM time_off_entries 
+     WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2`,
+    [empId, sixMonthsAgo.toISOString().split('T')[0]]
+  );
+  const unpaidLast6Months = parseInt(unpaidResult.rows[0].count);
   
   return {
-    baseDays,
-    additionalDays,
-    totalDays,
-    baseHours: 80,
-    additionalHours: additionalDays * hoursPerDay,
-    totalHours: 80 + (additionalDays * hoursPerDay),
+    // Hours worked
+    totalHoursWorked: Math.round(totalHoursWorked * 100) / 100,
+    
+    // Accrual
+    accruedHours: Math.round(accruedHours * 100) / 100,
+    accruedDays: Math.round((accruedHours / hoursPerDay) * 100) / 100,
+    accrualRate: '1hr per 20hrs worked',
+    accrualCap: 80,
+    
+    // Tenure bonus
+    tenureBonusDays: tenure.additionalDays,
+    tenureBonusHours: Math.round(tenureBonusHours * 100) / 100,
+    yearsEmployed: tenure.yearsEmployed,
+    
+    // Carryover
+    carryoverHours: carryover,
+    carryoverDays: Math.round((carryover / hoursPerDay) * 100) / 100,
+    
+    // Totals
+    totalAvailableHours: Math.round(totalAvailableHours * 100) / 100,
+    totalAvailableDays: Math.round(totalAvailableDays * 100) / 100,
+    
+    // Used
+    daysUsed,
+    hoursUsed: Math.round(hoursUsed * 100) / 100,
+    
+    // Remaining
+    remainingHours: Math.round(remainingHours * 100) / 100,
+    remainingDays: Math.round(remainingDays * 100) / 100,
+    
+    // Unpaid
+    unpaidLast6Months,
+    unpaidWarning: unpaidLast6Months > 5,
+    
+    // Info
     hoursPerDay,
-    yearsEmployed,
-    carryoverCap: 80
+    isFullTime,
   };
 }
 
@@ -442,11 +537,25 @@ app.post('/api/employees', requireRole('owner', 'hr', 'payroll'), async (req, re
 
 app.put('/api/employees/:id', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
   try {
-    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active } = req.body;
+    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours } = req.body;
     const result = await pool.query(
-      `UPDATE employees SET first_name=$1, last_name=$2, center=$3, classroom=$4, position=$5, year_hired=$6, start_date=$7, scheduled_times=$8, is_full_time=$9, weekly_hours=$10, hourly_rate=$11, is_admin=$12, is_active=$13
-       WHERE id=$14 RETURNING *`,
-      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, req.params.id]
+      `UPDATE employees SET first_name=$1, last_name=$2, center=$3, classroom=$4, position=$5, year_hired=$6, start_date=$7, scheduled_times=$8, is_full_time=$9, weekly_hours=$10, hourly_rate=$11, is_admin=$12, is_active=$13, pto_carryover_hours=COALESCE($14, pto_carryover_hours)
+       WHERE id=$15 RETURNING *`,
+      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Update PTO carryover for an employee
+app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
+  try {
+    const { carryover_hours } = req.body;
+    const result = await pool.query(
+      `UPDATE employees SET pto_carryover_hours = $1 WHERE id = $2 RETURNING id, first_name, last_name, pto_carryover_hours`,
+      [parseFloat(carryover_hours) || 0, req.params.id]
     );
     res.json(result.rows[0]);
   } catch (err) {
@@ -476,30 +585,15 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
       delete employee.hourly_rate;
     }
     
-    // PTO allowance
-    employee.pto = calculatePTOAllowance(employee.year_hired, employee.is_full_time, employee.is_admin, parseFloat(employee.weekly_hours) || 40);
-    
-    // PTO used this year
-    const year = new Date().getFullYear();
-    const ptoUsed = await pool.query(
-      `SELECT COUNT(*) as days_used FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND EXTRACT(YEAR FROM entry_date) = $2`,
-      [req.params.id, year]
+    // Actual PTO calculation using hours worked
+    employee.pto = await calculateActualPTO(
+      employee.id, employee.year_hired, employee.is_full_time, 
+      employee.is_admin, parseFloat(employee.weekly_hours) || 40,
+      employee.pto_carryover_hours || 0
     );
-    employee.ptoDaysUsed = parseInt(ptoUsed.rows[0].days_used);
-    employee.ptoDaysRemaining = employee.pto.totalDays - employee.ptoDaysUsed;
-    
-    // Unpaid days in last 6 months
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    const unpaid = await pool.query(
-      `SELECT COUNT(*) as unpaid_count, array_agg(entry_date ORDER BY entry_date) as dates FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2`,
-      [req.params.id, sixMonthsAgo.toISOString().split('T')[0]]
-    );
-    employee.unpaidLast6Months = parseInt(unpaid.rows[0].unpaid_count);
-    employee.unpaidDates = unpaid.rows[0].dates || [];
-    employee.unpaidWarning = employee.unpaidLast6Months > 5;
     
     // Time off entries this year
+    const year = new Date().getFullYear();
     const entries = await pool.query(
       `SELECT * FROM time_off_entries WHERE employee_id = $1 AND EXTRACT(YEAR FROM entry_date) = $2 ORDER BY entry_date`,
       [req.params.id, year]
