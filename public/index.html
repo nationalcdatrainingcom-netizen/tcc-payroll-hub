@@ -700,8 +700,8 @@ async function renderEmployees() {
   
   html += `<div class="card"><div class="card-body"><div class="table-scroll">
     <table class="data-table"><thead><tr>
-      <th>Name</th><th>Center</th><th>Position</th><th>Year Hired</th><th>Years</th>
-      <th>Schedule</th><th>FT/PT</th><th>PTO Days</th>
+      <th>Name</th><th>Center</th><th>Classroom</th><th>Position</th><th>Year Hired</th><th>Years</th>
+      <th>Schedule</th><th>FT/PT</th><th>PTO Max</th>
       ${showRate ? '<th>Rate</th>' : ''}
       <th>Actions</th>
     </tr></thead><tbody>`;
@@ -711,12 +711,13 @@ async function renderEmployees() {
     html += `<tr class="clickable">
       <td onclick="showEmployeeDetail(${e.id})"><strong>${e.last_name}, ${e.first_name}</strong></td>
       <td>${e.center}</td>
+      <td style="font-size:11px">${e.classroom || '—'}</td>
       <td>${e.position || '—'}</td>
       <td>${e.year_hired}</td>
       <td>${yrs}</td>
       <td style="font-size:11px">${e.scheduled_times || '—'}</td>
       <td><span class="badge ${e.is_full_time ? 'badge-success' : 'badge-info'}">${e.is_full_time ? 'FT' : 'PT'}</span></td>
-      <td>${e.pto.totalDays}</td>
+      <td>${e.pto.totalMaxDays}</td>
       ${showRate ? `<td style="font-family:'JetBrains Mono',monospace;font-size:12px">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>` : ''}
       <td><button class="btn btn-outline btn-sm" onclick="showEmployeeDetail(${e.id})">View</button></td>
     </tr>`;
@@ -1707,6 +1708,7 @@ async function renderStaffingPlan() {
     <div style="display:flex;gap:8px;align-items:center">
       <div style="font-size:11px;color:var(--gray-400)">License #DC110415511 · Mary Wardlaw, Licensee</div>
       ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="showAddStaffingEntry('${center}')">+ Add Staff</button>` : ''}
+      <button class="btn btn-outline btn-sm" onclick="window.open('/api/staffing-plan/print/${encodeURIComponent(center)}','_blank')">🖨️ Print</button>
     </div>
   </div><div class="card-body"><div class="table-scroll">
     <table class="data-table" style="font-size:11px">
