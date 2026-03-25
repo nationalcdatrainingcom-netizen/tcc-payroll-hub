@@ -972,6 +972,10 @@ app.post('/api/staffing-plan', requireRole('owner', 'hr', 'director'), async (re
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
       [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training]
     );
+    // Sync to employee record
+    if (d.employee_id) {
+      await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
+    }
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -985,6 +989,10 @@ app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async 
       `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18 WHERE id=$19 RETURNING *`,
       [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, req.params.id]
     );
+    // Sync to employee record
+    if (d.employee_id) {
+      await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
+    }
     res.json(result.rows[0]);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -995,6 +1003,119 @@ app.delete('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), asy
   try {
     await pool.query('DELETE FROM staffing_plan WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Printable staffing plan - landscape HTML for printing
+app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
+  try {
+    const center = decodeURIComponent(req.params.center);
+    const spData = await pool.query(
+      `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule
+       FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
+       WHERE sp.center = $1
+       ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`,
+      [center]
+    );
+
+    // Deduplicate by employee_id
+    const seen = new Set();
+    const rows = spData.rows.filter(r => { if (seen.has(r.employee_id)) return false; seen.add(r.employee_id); return true; });
+
+    // Get signature
+    const sig = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
+    const sigData = sig.rows[0];
+
+    // License info
+    const licenseNum = center === 'Montessori' ? 'DC110278344' : 'DC110415511';
+    const centerFull = center === 'Montessori' ? 'Montessori Children\'s Center' : `The Children's Center - ${center}`;
+
+    function fd(d) {
+      if (!d) return '';
+      const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d);
+      const m = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+      return m ? parseInt(m[2])+'/'+parseInt(m[3])+'/'+m[1].slice(2) : '';
+    }
+
+    // Group by classroom
+    const classrooms = {};
+    rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
+
+    let tableRows = '';
+    for (const [cls, staff] of Object.entries(classrooms)) {
+      tableRows += `<tr class="section"><td colspan="19">${cls}</td></tr>`;
+      staff.forEach(s => {
+        tableRows += `<tr>
+          <td>${s.role_in_room||''}</td>
+          <td class="name">${(s.first_name||'')+' '+(s.last_name||'')}</td>
+          <td>${fd(s.emp_start_date)}</td>
+          <td>${s.emp_schedule||''}</td>
+          <td>${fd(s.orientation_date)}</td>
+          <td>${fd(s.cpr_first_aid_date)}</td>
+          <td>${fd(s.health_safety_abc_date)}</td>
+          <td>${fd(s.health_safety_refresher)}</td>
+          <td>${fd(s.ccbc_consent_date)}</td>
+          <td>${fd(s.fingerprinting_date)}</td>
+          <td>${fd(s.date_eligible)}</td>
+          <td>${fd(s.abuse_neglect_statement)}</td>
+          <td>${fd(s.last_evaluation)}</td>
+          <td>${fd(s.date_promoted_lead)}</td>
+          <td>${fd(s.date_assigned_room)}</td>
+          <td>${s.education||''}</td>
+          <td>${s.semester_hours||''}</td>
+          <td>${s.infant_toddler_training||''}</td>
+        </tr>`;
+      });
+    }
+
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Staffing Plan — ${centerFull}</title>
+<style>
+  @page { size: landscape; margin: 0.3in; }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 7pt; color: #1B2A4A; }
+  .header { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:6px; padding-bottom:4px; border-bottom:2px solid #C8963E; }
+  .header h1 { font-size:11pt; font-weight:700; }
+  .header .sub { font-size:7pt; color:#666; }
+  .header .sig { text-align:right; }
+  .header .sig img { height:25px; }
+  table { width:100%; border-collapse:collapse; font-size:6.5pt; }
+  th { background:#1B2A4A; color:white; padding:2px 3px; text-align:left; font-weight:600; font-size:6pt; white-space:nowrap; }
+  td { padding:2px 3px; border-bottom:0.5px solid #ddd; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:90px; }
+  td.name { font-weight:600; max-width:100px; }
+  tr.section td { background:#1B2A4A; color:white; font-weight:700; font-size:7pt; padding:3px 5px; }
+  tr:nth-child(even):not(.section) { background:#f8f9fa; }
+  .resp-row { font-size:5.5pt; color:#888; margin-bottom:2px; }
+  @media print { body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
+</style></head><body>
+<div class="header">
+  <div>
+    <h1>Staffing Plan</h1>
+    <div class="sub">${centerFull} · License #${licenseNum}</div>
+    <div class="sub">All Staff and Unsupervised Volunteers · ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</div>
+  </div>
+  <div class="sig">
+    <div class="sub">Mary Wardlaw, Licensee</div>
+    ${sigData?.value ? `<img src="${sigData.value}"><div class="sub">${new Date(sigData.updated_at).toLocaleDateString()}</div>` : ''}
+  </div>
+</div>
+<div class="resp-row">Responsible: Program Director completes Name, Start Date, Schedule, Evaluations, Promoted, Room Assigned · Amy (Dir. Professional Development) completes Orientation, CPR, H&S, CCBC, Fingerprint, Eligible, Abuse/Neglect, Education, Hours, I/T Training</div>
+<table>
+<thead><tr>
+  <th>Role</th><th>Name</th><th>Start</th><th>Schedule</th>
+  <th>Orient.</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Ref.</th>
+  <th>CCBC</th><th>Fingerpr.</th><th>Eligible</th><th>Abuse/Neg.</th>
+  <th>Last Eval</th><th>Promoted</th><th>Room Asgn</th>
+  <th>Education</th><th>Hrs/CEUs</th><th>I/T Training</th>
+</tr></thead>
+<tbody>${tableRows}</tbody>
+</table>
+<script>window.onload=function(){window.print()}</script>
+</body></html>`;
+
+    res.send(html);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
