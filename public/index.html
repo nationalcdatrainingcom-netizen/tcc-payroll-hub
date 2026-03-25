@@ -365,7 +365,6 @@ let pendingIncreases = 0;
 
 const CENTERS = ['Peace Boulevard', 'Niles', 'Montessori'];
 const PEACE_CLASSROOMS = [
-  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Infants - Caterpillars', roles: ['Co-Lead','Co-Lead'] },
   { section: 'Infants/Toddlers - Butterflies', roles: ['Lead','Assistant'] },
   { section: 'Toddlers - Dolphins', roles: ['Lead','Assistant'] },
@@ -380,11 +379,11 @@ const PEACE_CLASSROOMS = [
   { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater','Floater','Floater','Floater'] },
   { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
   { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
-  { section: 'Supervised Volunteers', roles: ['','','','','',''] }
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
 ];
 
 const NILES_CLASSROOMS = [
-  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Infants/Ones', roles: ['Lead','Assistant','Assistant','Assistant'] },
   { section: 'Ones/Twos', roles: ['Lead','Assistant','Caregiver'] },
   { section: 'Strong Beginnings - Threes', roles: ['Lead','Assistant','Caregiver'] },
@@ -395,11 +394,11 @@ const NILES_CLASSROOMS = [
   { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater'] },
   { section: 'Subs from other centers', roles: ['Sub','Sub'] },
   { section: 'Therapist / Unsupervised Volunteers', roles: ['','',''] },
-  { section: 'Supervised Volunteers', roles: ['','','','','',''] }
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
 ];
 
 const MCC_CLASSROOMS = [
-  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] },
   { section: 'Toddlers - Purple', roles: ['Lead','Assistant','Assistant'] },
   { section: 'Pre-Primary - Yellow', roles: ['Lead','Assistant','Assistant'] },
   { section: 'Primary - Red', roles: ['Lead','Assistant','Caregiver'] },
@@ -409,7 +408,8 @@ const MCC_CLASSROOMS = [
   { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater'] },
   { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
   { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
-  { section: 'Supervised Volunteers', roles: ['','','','','',''] }
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
 ];
 
 const CENTER_CLASSROOMS = {
@@ -1818,7 +1818,7 @@ async function renderStaffingPlan() {
     return true;
   });
   
-  // Find unassigned staff — employees at this center not in the staffing plan
+  // Find unassigned staff
   const assignedIds = new Set(centerData.map(s => s.employee_id));
   const centerEmployees = employees.filter(e => e.center === center);
   const unassigned = centerEmployees.filter(e => !assignedIds.has(e.id));
@@ -1839,22 +1839,21 @@ async function renderStaffingPlan() {
   // ---- UNASSIGNED STAFF SECTION ----
   if (canEdit && unassigned.length > 0) {
     html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
-      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3>
-        <div style="font-size:11px;color:var(--gray-400)">Drag staff to a classroom below, or click Assign</div>
-      </div><div class="card-body">
-      <div style="display:flex;flex-wrap:wrap;gap:8px" id="unassignedPool">`;
+      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3></div>
+      <div class="card-body">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">`;
     
     unassigned.forEach(e => {
-      html += `<div class="unassigned-chip" draggable="true" data-emp-id="${e.id}" data-emp-name="${e.last_name}, ${e.first_name}"
-        ondragstart="dragStaff(event,${e.id},'${e.first_name.replace(/'/g,"\\'")}','${e.last_name.replace(/'/g,"\\'")}')"
-        style="display:inline-flex;align-items:center;gap:6px;padding:6px 12px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600;cursor:grab;user-select:none">
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600">
         <span>👤</span> ${e.last_name}, ${e.first_name}
         <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
-        <button class="btn btn-outline btn-sm" style="padding:2px 6px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign</button>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
       </div>`;
     });
     
-    html += `</div></div></div>`;
+    html += `</div>
+      <div style="font-size:11px;color:var(--gray-400)">Click "Assign →" to place staff in a classroom with a role.</div>
+    </div></div>`;
   }
   
   // ---- STAFFING PLAN TABLE ----
@@ -1879,11 +1878,8 @@ async function renderStaffingPlan() {
   orderedClassrooms.forEach(classroom => {
     const staff = classroomMap[classroom] || [];
     const colSpan = canEdit ? 20 : 19;
-    html += `<tr style="background:var(--navy);color:white" class="drop-target" data-classroom="${classroom}" data-center="${center}"
-      ondragover="event.preventDefault();this.style.background='var(--gold)'" 
-      ondragleave="this.style.background='var(--navy)'"
-      ondrop="dropStaff(event,'${classroom.replace(/'/g,"\\'")}','${center.replace(/'/g,"\\'")}')" >
-      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">${classroom} ${canEdit ? '<span style="font-size:10px;opacity:0.6">— drop staff here</span>' : ''}</td>
+    html += `<tr style="background:var(--navy);color:white">
+      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">${classroom}</td>
     </tr>`;
     
     if (staff.length === 0) {
@@ -1921,33 +1917,6 @@ async function renderStaffingPlan() {
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
-}
-
-// Drag and drop handlers
-function dragStaff(e, empId, firstName, lastName) {
-  e.dataTransfer.setData('text/plain', JSON.stringify({ empId, firstName, lastName }));
-  e.dataTransfer.effectAllowed = 'move';
-}
-
-async function dropStaff(e, classroom, center) {
-  e.preventDefault();
-  e.currentTarget.style.background = 'var(--navy)';
-  
-  try {
-    const data = JSON.parse(e.dataTransfer.getData('text/plain'));
-    // Ask for role
-    const role = prompt(`Assign ${data.firstName} ${data.lastName} to ${classroom}.\n\nRole (Lead, Co-Lead, Assistant, Caregiver, Floater, Director, Asst. Director, Office, Food Prep):`, 'Assistant');
-    if (!role) return;
-    
-    await api('/api/staffing-plan', { method: 'POST', body: {
-      employee_id: data.empId, center, classroom, role_in_room: role,
-      orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
-      ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
-      last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
-    }});
-    await loadEmployees();
-    renderStaffingPlan();
-  } catch(err) { alert('Error: ' + err.message); }
 }
 
 async function quickAssign(empId, center) {
