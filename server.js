@@ -671,14 +671,28 @@ function parseBillableHours(str) {
 }
 
 // CSV Timecard import - Playground format
-app.post('/api/import-timecard', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
+app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), upload.single('file'), async (req, res) => {
   try {
     const results = [];
+    
+    // Read file, strip BOM if present
+    let fileContent = fs.readFileSync(req.file.path, 'utf8');
+    if (fileContent.charCodeAt(0) === 0xFEFF) {
+      fileContent = fileContent.substring(1);
+    }
+    fs.writeFileSync(req.file.path, fileContent, 'utf8');
     
     await new Promise((resolve, reject) => {
       fs.createReadStream(req.file.path)
         .pipe(csv())
-        .on('data', (data) => results.push(data))
+        .on('data', (data) => {
+          // Also strip BOM from any key names just in case
+          const clean = {};
+          for (const [k, v] of Object.entries(data)) {
+            clean[k.replace(/^\uFEFF/, '').trim()] = v;
+          }
+          results.push(clean);
+        })
         .on('end', resolve)
         .on('error', reject);
     });
