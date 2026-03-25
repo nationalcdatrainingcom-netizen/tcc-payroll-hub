@@ -517,6 +517,10 @@ function buildNav() {
   items.push({ section: 'Compliance' });
   items.push({ id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['owner','payroll','hr','director'] });
   
+  if (['owner','payroll','hr'].includes(role)) {
+    items.push({ id: 'archive', icon: '📦', label: 'Archive', roles: ['owner','payroll','hr'] });
+  }
+  
   if (role === 'owner') {
     items.push({ section: 'Settings' });
     items.push({ id: 'signature', icon: '✍️', label: 'Signature', roles: ['owner'] });
@@ -550,6 +554,7 @@ function navigate(page) {
     'pay-increases': 'Pay Increase Requests',
     'documents': 'Document Center',
     'staffing-plan': 'Staffing Plan',
+    'archive': 'Employee Archive',
     'signature': 'Signature Settings'
   };
   document.getElementById('pageTitle').textContent = titles[page] || page;
@@ -563,6 +568,7 @@ function navigate(page) {
     'pay-increases': renderPayIncreases,
     'documents': renderDocuments,
     'staffing-plan': renderStaffingPlan,
+    'archive': renderArchive,
     'signature': renderSignature
   };
   
@@ -849,9 +855,9 @@ function showEditEmployee(empId) {
         ${showRate ? `<div class="form-group"><label>Hourly Rate</label><input id="editRate" type="number" step="0.01" value="${emp.hourly_rate||''}"></div>` : '<div></div>'}
       </div>
       <div class="form-group"><label><input type="checkbox" id="editAdmin"${emp.is_admin?' checked':''}> Administrator / Senior Staff</label></div>
-      <div class="form-group"><label><input type="checkbox" id="editActive"${emp.is_active !== false?' checked':''}> Active Employee</label></div>
     </div>
-    <div class="modal-footer">
+    <div class="modal-footer" style="justify-content:space-between">
+      <button class="btn btn-danger btn-sm" onclick="showTerminate(${empId})" style="margin-right:auto">🚫 Terminate Employee</button>
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveEditEmployee(${empId})">Save Changes</button>
     </div>`;
@@ -875,12 +881,116 @@ async function saveEditEmployee(empId) {
       is_full_time: document.getElementById('editFT').value === 'true',
       hourly_rate: document.getElementById('editRate')?.value ? parseFloat(document.getElementById('editRate').value) : null,
       is_admin: document.getElementById('editAdmin').checked,
-      is_active: document.getElementById('editActive').checked,
+      is_active: true,
     };
     await api(`/api/employees/${empId}`, { method: 'PUT', body });
     closeModal();
     await loadEmployees();
     renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function showTerminate(empId) {
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  
+  let html = `<div class="modal-header"><h3 style="color:var(--danger)">🚫 Terminate Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:14px;margin-bottom:16px">
+        <p style="font-size:14px;font-weight:700;color:var(--danger);margin-bottom:4px">${emp.first_name} ${emp.last_name}</p>
+        <p style="font-size:12px;color:var(--gray-600)">${emp.center} · ${emp.position || ''}</p>
+      </div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">This will remove the employee from the active roster and staffing plan. All their data (hours, PTO, documents, pay history) will be preserved in the archive and accessible to admin users.</p>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">If the employee has hours in a current pay period, they will continue to appear on payroll reports until those hours are processed.</p>
+      <div class="form-group"><label>Termination Date</label><input type="date" id="termDate" value="${new Date().toISOString().split('T')[0]}"></div>
+      <div class="form-group"><label>Reason</label><textarea id="termReason" rows="3" placeholder="Reason for termination (resignation, end of contract, etc.)"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmTerminate(${empId})">Confirm Termination</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function confirmTerminate(empId) {
+  const date = document.getElementById('termDate').value;
+  const reason = document.getElementById('termReason').value;
+  if (!date) return alert('Please enter a termination date.');
+  if (!confirm('Are you sure you want to terminate this employee? This action can be reversed from the Archive.')) return;
+  
+  try {
+    await api(`/api/employees/${empId}/terminate`, { method: 'POST', body: { terminated_date: date, termination_reason: reason } });
+    closeModal();
+    await loadEmployees();
+    renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// ARCHIVE PAGE
+// ========================
+async function renderArchive() {
+  const el = document.getElementById('pageContent');
+  
+  let archived = [];
+  try { archived = await api('/api/employees/archive'); } catch(e) {}
+  
+  let html = `<div class="card"><div class="card-header"><h3>Terminated / Archived Employees (${archived.length})</h3></div><div class="card-body">`;
+  
+  if (archived.length === 0) {
+    html += `<div class="empty-state"><div class="icon">📦</div><p>No archived employees.</p></div>`;
+  } else {
+    html += `<table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Position</th><th>Year Hired</th><th>Terminated</th><th>Reason</th><th>By</th><th>YTD Hours</th><th>Actions</th>
+    </tr></thead><tbody>`;
+    
+    archived.forEach(e => {
+      const termDate = e.terminated_date ? fmtDate(e.terminated_date) : '—';
+      html += `<tr>
+        <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+        <td>${e.center}</td>
+        <td>${e.position || '—'}</td>
+        <td>${e.year_hired}</td>
+        <td>${termDate}</td>
+        <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${e.termination_reason || '—'}</td>
+        <td style="font-size:11px">${e.terminated_by || '—'}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${parseFloat(e.ytd_hours || 0).toFixed(1)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="viewArchivedEmployee(${e.id})">View</button>
+          <button class="btn btn-success btn-sm" onclick="reinstateEmployee(${e.id})">Reinstate</button>
+        </td>
+      </tr>`;
+    });
+    
+    html += `</tbody></table>`;
+  }
+  
+  html += `<div style="font-size:11px;color:var(--gray-400);margin-top:12px">
+    Archived employees retain all data (hours, PTO, documents, pay history). 
+    Terminated employees with hours in a pay period still appear on payroll reports until those hours are processed.
+    Click "Reinstate" to return an employee to the active roster.
+  </div></div></div>`;
+  
+  el.innerHTML = html;
+}
+
+async function viewArchivedEmployee(empId) {
+  try {
+    // Use a direct query since the detail endpoint filters inactive
+    const emp = await api(`/api/employees/${empId}/detail`);
+    showEmployeeDetail(empId);
+  } catch(e) {
+    alert('Unable to view archived employee details. The employee may need to be reinstated first.');
+  }
+}
+
+async function reinstateEmployee(empId) {
+  if (!confirm('Reinstate this employee to the active roster?')) return;
+  try {
+    await api(`/api/employees/${empId}/reinstate`, { method: 'POST' });
+    await loadEmployees();
+    renderArchive();
   } catch(e) { alert('Error: ' + e.message); }
 }
 
@@ -1859,24 +1969,40 @@ async function renderStaffingPlan() {
     if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
   });
   
-  // ---- UNASSIGNED STAFF SECTION ----
+  // Store center for drag handlers
+  window._spCenter = center;
+  
+  // ---- UNASSIGNED STAFF SECTION with drag-and-drop ----
   if (canEdit && unassigned.length > 0) {
     html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
       <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3></div>
       <div class="card-body">
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px">`;
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px" id="unassignedPool">`;
     
     unassigned.forEach(e => {
-      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600">
+      html += `<div class="drag-chip" draggable="true" id="chip-${e.id}"
+        style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600;cursor:grab;user-select:none;transition:opacity 0.2s"
+        data-emp-id="${e.id}" data-emp-name="${e.last_name}, ${e.first_name}">
         <span>👤</span> ${e.last_name}, ${e.first_name}
         <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
-        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="event.stopPropagation();quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
       </div>`;
     });
     
     html += `</div>
-      <div style="font-size:11px;color:var(--gray-400)">Click "Assign →" to place staff in a classroom with a role.</div>
-    </div></div>`;
+    
+    <div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:8px">↓ Drag a name onto a classroom below ↓</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px" id="dropZones">`;
+    
+    orderedClassrooms.forEach(classroom => {
+      const count = (classroomMap[classroom] || []).length;
+      html += `<div class="drop-zone" data-classroom="${classroom}"
+        style="padding:10px 12px;border:2px dashed var(--gray-300);border-radius:8px;text-align:center;font-size:11px;font-weight:600;color:var(--gray-400);transition:all 0.2s;cursor:default;min-height:45px;display:flex;align-items:center;justify-content:center">
+        ${classroom} <span style="font-weight:400;margin-left:4px">(${count})</span>
+      </div>`;
+    });
+    
+    html += `</div></div></div>`;
   }
   
   // ---- STAFFING PLAN TABLE ----
@@ -1940,6 +2066,58 @@ async function renderStaffingPlan() {
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
+  
+  // Setup drag-and-drop after DOM renders
+  setTimeout(setupDragDrop, 50);
+}
+
+function setupDragDrop() {
+  const chips = document.querySelectorAll('.drag-chip');
+  const zones = document.querySelectorAll('.drop-zone');
+  if (!chips.length || !zones.length) return;
+  
+  chips.forEach(chip => {
+    chip.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('text/plain', chip.dataset.empId);
+      e.dataTransfer.effectAllowed = 'move';
+      chip.style.opacity = '0.4';
+    });
+    chip.addEventListener('dragend', () => { chip.style.opacity = '1'; });
+  });
+  
+  zones.forEach(zone => {
+    zone.addEventListener('dragover', e => {
+      e.preventDefault();
+      zone.style.borderColor = 'var(--gold)';
+      zone.style.background = 'var(--gold-pale)';
+      zone.style.color = 'var(--navy)';
+    });
+    zone.addEventListener('dragleave', () => {
+      zone.style.borderColor = 'var(--gray-300)';
+      zone.style.background = 'transparent';
+      zone.style.color = 'var(--gray-400)';
+    });
+    zone.addEventListener('drop', async e => {
+      e.preventDefault();
+      zone.style.borderColor = 'var(--success)'; zone.style.background = 'var(--success-bg)'; zone.style.color = 'var(--success)';
+      const empId = e.dataTransfer.getData('text/plain');
+      const classroom = zone.dataset.classroom;
+      const center = window._spCenter;
+      const chip = document.getElementById('chip-' + empId);
+      const role = prompt('Assign ' + (chip?.dataset.empName||'') + ' to ' + classroom + '.\n\nRole:', 'Assistant');
+      if (!role) { zone.style.borderColor='var(--gray-300)';zone.style.background='transparent';zone.style.color='var(--gray-400)'; return; }
+      try {
+        await api('/api/staffing-plan', { method: 'POST', body: {
+          employee_id: parseInt(empId), center, classroom, role_in_room: role,
+          orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
+          ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
+          last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
+        }});
+        await loadEmployees();
+        renderStaffingPlan();
+      } catch(err) { alert('Error: ' + err.message); }
+    });
+  });
 }
 
 async function quickAssign(empId, center) {
