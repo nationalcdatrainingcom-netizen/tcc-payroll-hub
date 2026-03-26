@@ -1730,13 +1730,11 @@ async function renderDirectorPayroll() {
   const center = currentUser.center;
   const filtered = employees.filter(e => e.center === center && !isAdminStaff(e));
   
-  // Pay period dates
   const start = new Date(payPeriod.start + 'T12:00:00');
   const end = new Date(payPeriod.end + 'T12:00:00');
   const dates = [];
   for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) dates.push(new Date(d));
   
-  // Load workflow status
   let ppStatus = {};
   try {
     const allStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`);
@@ -1748,34 +1746,60 @@ async function renderDirectorPayroll() {
   const isLockedByJared = !!ppStatus.payroll_accessed_at;
   const changePending = !!ppStatus.change_request_pending;
   
-  let html = `<div style="margin-bottom:16px;font-size:13px;color:var(--gray-600)">
+  let html = `<div style="margin-bottom:20px;font-size:14px;color:var(--gray-600)">
     <strong>Pay Period:</strong> ${payPeriod.label} · <strong>Next report due:</strong> ${getNextReportDue()}
   </div>`;
   
-  // Status overview
-  html += `<div class="stats-row" style="margin-bottom:20px">
-    <div class="stat-card ${tcUploaded ? 'green' : 'red'}">
-      <div class="stat-label">Step 1: Timecards</div>
-      <div class="stat-value" style="font-size:16px">${tcUploaded ? '✅ Uploaded' : '⏳ Pending'}</div>
-    </div>
-    <div class="stat-card ${isSubmitted ? 'green' : 'red'}">
-      <div class="stat-label">Step 2: Time Off</div>
-      <div class="stat-value" style="font-size:16px">${isSubmitted ? '✅ Submitted' : '⏳ Pending'}</div>
-    </div>
-  </div>`;
+  // ---- STEP CARDS (approved design) ----
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">`;
+  
+  // Step 1 card
+  if (tcUploaded) {
+    html += `<div style="background:#EAF3DE;border:2px solid #639922;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#27500A;margin-bottom:4px">STEP 1</div>
+      <div style="font-size:16px;font-weight:500;color:#173404;margin-bottom:8px">Upload daily staff attendance</div>
+      <div style="font-size:12px;color:#3B6D11;margin-bottom:12px">Timecards uploaded for ${payPeriod.label}</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#C0DD97;color:#173404;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Complete</div>
+    </div>`;
+  } else {
+    html += `<div style="background:#FCEBEB;border:2px solid #E24B4A;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#791F1F;margin-bottom:4px">STEP 1</div>
+      <div style="font-size:16px;font-weight:500;color:#501313;margin-bottom:8px">Upload daily staff attendance</div>
+      <div style="font-size:12px;color:#A32D2D;margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <b>${center}</b> for <b>${payPeriod.label}</b></div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#F09595;color:#501313;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Action required</div>
+    </div>`;
+  }
+  
+  // Step 2 card
+  if (isSubmitted) {
+    html += `<div style="background:#EAF3DE;border:2px solid #639922;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#27500A;margin-bottom:4px">STEP 2</div>
+      <div style="font-size:16px;font-weight:500;color:#173404;margin-bottom:8px">Enter & submit time off</div>
+      <div style="font-size:12px;color:#3B6D11;margin-bottom:12px">Submitted by ${ppStatus.timeoff_submitted_by||'Director'} on ${ppStatus.timeoff_submitted_at ? new Date(ppStatus.timeoff_submitted_at).toLocaleDateString() : ''}</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#C0DD97;color:#173404;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Complete</div>
+    </div>`;
+  } else {
+    html += `<div style="background:#FCEBEB;border:2px solid #E24B4A;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#791F1F;margin-bottom:4px">STEP 2</div>
+      <div style="font-size:16px;font-weight:500;color:#501313;margin-bottom:8px">Enter & submit time off</div>
+      <div style="font-size:12px;color:#A32D2D;margin-bottom:12px">Review and enter all paid (P) and unpaid (U) time off for this pay period, then submit.</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#F09595;color:#501313;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Action required</div>
+    </div>`;
+  }
+  
+  html += `</div>`;
   
   // ---- SECTION 1: Upload Timecards ----
   html += `<div class="card" style="margin-bottom:20px"><div class="card-header"><h3>Step 1: Upload Daily Staff Attendance</h3></div>
     <div class="card-body">
       <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${payPeriod.label}</strong>.</p>
-      ${tcUploaded ? '<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:10px 14px;margin-bottom:12px;color:var(--success);font-weight:600">✅ Timecards uploaded for this period</div>' : ''}
+      ${tcUploaded ? '<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#27500A;font-weight:600">✅ Timecards uploaded for this period</div>' : ''}
       <input type="file" id="dirTimecardFile" accept=".csv" style="margin-bottom:12px">
       <button class="btn btn-primary" onclick="dirUploadTimecard()">Upload CSV</button>
       <div id="dirTimecardResult" style="margin-top:12px"></div>
     </div></div>`;
   
   // ---- SECTION 2: Enter Time Off ----
-  // Load time off entries
   const entries = {};
   try {
     const months = new Set();
@@ -1789,10 +1813,10 @@ async function renderDirectorPayroll() {
   
   const isEditable = !isSubmitted;
   
-  // Status banner
+  // Status banners for submitted / change request
   if (isSubmitted && !changePending) {
-    html += `<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
-      <div><span style="font-weight:700;color:var(--success)">✅ Time Off Report Submitted</span>
+    html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div><span style="font-weight:700;color:#27500A">✅ Time Off Report Submitted</span>
         <span style="font-size:12px;color:var(--gray-600);margin-left:12px">by ${ppStatus.timeoff_submitted_by||'Director'}</span></div>
       <div>
         ${!isLockedByJared ? '<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>' : ''}
@@ -1804,6 +1828,11 @@ async function renderDirectorPayroll() {
     html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px">
       <span style="font-weight:700;color:var(--warning)">⏳ Change Request Pending</span>
       <span style="font-size:12px;color:var(--gray-600);margin-left:12px">${ppStatus.change_request_reason||''}</span>
+    </div>`;
+  }
+  if (isSubmitted && isLockedByJared && !changePending) {
+    html += `<div style="background:var(--gray-100);border:1px solid var(--gray-300);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+      🔒 Payroll processing has begun. To make changes, click "Request Change" above.
     </div>`;
   }
   
