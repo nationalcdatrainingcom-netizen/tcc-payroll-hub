@@ -503,8 +503,9 @@ function buildNav() {
   let items = [
     { id: 'dashboard', icon: '📊', label: 'A&P Dashboard', roles: ['owner','payroll','hr','director'] },
     { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll','hr','director'] },
-    { id: 'timeoff', icon: '📅', label: 'Time Off', roles: ['owner','payroll','hr','director'] },
-    { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly Calendar', roles: ['owner','payroll','hr','director'] },
+    { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll','hr','director'] },
+    { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll','hr','director'] },
+    { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll','hr','director'] },
   ];
   
   if (['owner','payroll','hr'].includes(role)) {
@@ -548,8 +549,9 @@ function navigate(page) {
   const titles = {
     'dashboard': 'ATTENDANCE & PAYROLL SUITE Dashboard',
     'employees': 'Employee Roster',
-    'timeoff': 'Time Off Tracking',
-    'timeoff-calendar': 'Monthly Time Off Calendar',
+    'timeoff': 'Enter Time Off',
+    'timeoff-calendar': 'Monthly View Time Off',
+    'timeoff-yearly': 'Yearly View Time Off',
     'payroll': 'Payroll Processing',
     'pay-increases': 'Pay Increase Requests',
     'documents': 'Document Center',
@@ -564,6 +566,7 @@ function navigate(page) {
     'employees': renderEmployees,
     'timeoff': renderTimeOff,
     'timeoff-calendar': renderTimeOffCalendar,
+    'timeoff-yearly': renderTimeOffYearly,
     'payroll': renderPayroll,
     'pay-increases': renderPayIncreases,
     'documents': renderDocuments,
@@ -639,13 +642,35 @@ async function renderDashboard() {
   
   html += `</div>`;
   
-  // Center filter tabs (for non-directors)
+  // Center filter tabs with workflow status (for non-directors)
   if (!isDirector) {
+    // Load workflow status for current pay period
+    let wfStatus = {};
+    try { wfStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`); } catch(e) {}
+    const periods = wfStatus.periods || {};
+    
     html += `<div class="center-tabs" style="margin-bottom:16px">
       <div class="center-tab ${dashboardCenter==='all'?'active':''}" onclick="dashboardCenter='all';renderDashboard()">All Centers (${totalEmp})</div>`;
     CENTERS.forEach(c => {
       const count = centers[c] || 0;
-      html += `<div class="center-tab ${dashboardCenter===c?'active':''}" onclick="dashboardCenter='${c}';renderDashboard()">${c} (${count})</div>`;
+      const pp = periods[c] || {};
+      const tcDone = !!pp.timecards_uploaded;
+      const toDone = !!pp.timeoff_approved;
+      const dirDone = !!pp.director_closed;
+      
+      let statusColor, statusText;
+      if (dirDone) {
+        statusColor = 'var(--success)'; statusText = '✅ Completed';
+      } else if (tcDone || toDone) {
+        statusColor = 'var(--warning)'; statusText = '🟡 In Process';
+      } else {
+        statusColor = 'var(--danger)'; statusText = '🔴 Not Started';
+      }
+      
+      html += `<div class="center-tab ${dashboardCenter===c?'active':''}" onclick="dashboardCenter='${c}';renderDashboard()" 
+        style="${dashboardCenter!==c ? 'border-color:'+statusColor+';color:'+statusColor : ''}">
+        ${c} (${count})<br><span style="font-size:9px;font-weight:700">${statusText}</span>
+      </div>`;
     });
     html += `</div>`;
   }
@@ -1415,6 +1440,97 @@ function changeMonth(dir) {
 }
 
 // ========================
+// YEARLY VIEW TIME OFF
+// ========================
+async function renderTimeOffYearly() {
+  const el = document.getElementById('pageContent');
+  const yr = currentYear;
+  const isDirector = currentUser.role === 'director';
+  
+  let html = '';
+  
+  if (!isDirector) {
+    html += `<div class="center-tabs">
+      <div class="center-tab ${selectedCenter==='all'?'active':''}" onclick="selectedCenter='all';renderTimeOffYearly()">All</div>`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOffYearly()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  // Load all time off entries for the year
+  const allEntries = {};
+  for (let m = 1; m <= 12; m++) {
+    try {
+      const data = await api(`/api/time-off?month=${m}&year=${yr}`);
+      data.forEach(e => {
+        const key = e.employee_id;
+        if (!allEntries[key]) allEntries[key] = { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
+        if (e.entry_type === 'P') allEntries[key].paid[m-1]++;
+        else allEntries[key].unpaid[m-1]++;
+      });
+    } catch(e) {}
+  }
+  
+  const filtered = employees.filter(e => {
+    if (isDirector) return e.center === currentUser.center;
+    if (selectedCenter !== 'all') return e.center === selectedCenter;
+    return true;
+  });
+  
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  
+  html += `<div class="card"><div class="card-header"><h3>Yearly Time Off Summary — ${yr}</h3></div>
+    <div class="card-body"><div class="table-scroll">
+    <table class="data-table" style="font-size:11px">
+      <thead><tr>
+        <th style="min-width:150px">Name</th><th>Center</th>`;
+  months.forEach(m => { html += `<th style="text-align:center;min-width:55px">${m}</th>`; });
+  html += `<th style="text-align:center;font-weight:700">Total P</th><th style="text-align:center;font-weight:700">Total U</th></tr></thead><tbody>`;
+  
+  // Group by center if showing all
+  let currentCtr = '';
+  const sorted = [...filtered].sort((a,b) => {
+    if (selectedCenter === 'all' && a.center !== b.center) return a.center.localeCompare(b.center);
+    return a.last_name.localeCompare(b.last_name);
+  });
+  
+  sorted.forEach(emp => {
+    if (selectedCenter === 'all' && emp.center !== currentCtr) {
+      currentCtr = emp.center;
+      html += `<tr style="background:var(--navy);color:white"><td colspan="${15}" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+    }
+    
+    const data = allEntries[emp.id] || { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
+    let totalP = 0, totalU = 0;
+    
+    html += `<tr class="clickable" onclick="showEmployeeDetail(${emp.id})">
+      <td><strong>${emp.last_name}, ${emp.first_name}</strong></td>
+      <td style="font-size:10px">${emp.center}</td>`;
+    
+    for (let m = 0; m < 12; m++) {
+      const p = data.paid[m];
+      const u = data.unpaid[m];
+      totalP += p;
+      totalU += u;
+      let cellContent = '';
+      if (p > 0 && u > 0) cellContent = `<span style="color:var(--info);font-weight:600">${p}P</span> <span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else if (p > 0) cellContent = `<span style="color:var(--info);font-weight:600">${p}P</span>`;
+      else if (u > 0) cellContent = `<span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else cellContent = '<span style="color:var(--gray-200)">—</span>';
+      html += `<td style="text-align:center">${cellContent}</td>`;
+    }
+    
+    html += `<td style="text-align:center;font-weight:700;color:var(--info)">${totalP || '—'}</td>`;
+    html += `<td style="text-align:center;font-weight:700;color:${totalU > 5 ? 'var(--danger)' : 'var(--gray-600)'}">${totalU || '—'}${totalU > 5 ? ' ⚠️' : ''}</td>`;
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div></div></div>`;
+  el.innerHTML = html;
+}
+
+// ========================
 // PAYROLL PROCESSING
 // ========================
 async function renderPayroll() {
@@ -1487,7 +1603,7 @@ async function renderPayroll() {
     </div><div class="card-body">`;
     
     if (!pp.timecards_uploaded) {
-      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for ${center}.</p>
+      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${payPeriod.label}</strong>.</p>
         <input type="file" id="timecardFile" accept=".csv" style="margin-bottom:12px"><br>
         <button class="btn btn-primary" onclick="importTimecard()">Upload & Process</button>
         <div id="importResult" style="margin-top:16px"></div>
