@@ -501,7 +501,7 @@ async function showApp() {
 function buildNav() {
   const role = currentUser.role;
   let items = [
-    { id: 'dashboard', icon: '📊', label: 'Dashboard', roles: ['owner','payroll','hr','director'] },
+    { id: 'dashboard', icon: '📊', label: 'A&P Dashboard', roles: ['owner','payroll','hr','director'] },
     { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll','hr','director'] },
     { id: 'timeoff', icon: '📅', label: 'Time Off', roles: ['owner','payroll','hr','director'] },
     { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly Calendar', roles: ['owner','payroll','hr','director'] },
@@ -546,7 +546,7 @@ function navigate(page) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   
   const titles = {
-    'dashboard': 'Dashboard',
+    'dashboard': 'ATTENDANCE & PAYROLL SUITE Dashboard',
     'employees': 'Employee Roster',
     'timeoff': 'Time Off Tracking',
     'timeoff-calendar': 'Monthly Time Off Calendar',
@@ -1969,43 +1969,27 @@ async function renderStaffingPlan() {
     if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
   });
   
-  // Store center for drag handlers
+  // Build flat list of all staff with their classroom for move functionality
   window._spCenter = center;
+  window._spClassrooms = orderedClassrooms;
   
-  // ---- UNASSIGNED STAFF SECTION with drag-and-drop ----
+  // ---- UNASSIGNED STAFF SECTION ----
   if (canEdit && unassigned.length > 0) {
     html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
       <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3></div>
       <div class="card-body">
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px" id="unassignedPool">`;
-    
+      <div style="display:flex;flex-wrap:wrap;gap:8px">`;
     unassigned.forEach(e => {
-      html += `<div class="drag-chip" draggable="true" id="chip-${e.id}"
-        style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600;cursor:grab;user-select:none;transition:opacity 0.2s"
-        data-emp-id="${e.id}" data-emp-name="${e.last_name}, ${e.first_name}">
-        <span>👤</span> ${e.last_name}, ${e.first_name}
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600">
+        👤 ${e.last_name}, ${e.first_name}
         <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
-        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="event.stopPropagation();quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
       </div>`;
     });
-    
-    html += `</div>
-    
-    <div style="font-size:12px;font-weight:600;color:var(--navy);margin-bottom:8px">↓ Drag a name onto a classroom below ↓</div>
-    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px" id="dropZones">`;
-    
-    orderedClassrooms.forEach(classroom => {
-      const count = (classroomMap[classroom] || []).length;
-      html += `<div class="drop-zone" data-classroom="${classroom}"
-        style="padding:10px 12px;border:2px dashed var(--gray-300);border-radius:8px;text-align:center;font-size:11px;font-weight:600;color:var(--gray-400);transition:all 0.2s;cursor:default;min-height:45px;display:flex;align-items:center;justify-content:center">
-        ${classroom} <span style="font-weight:400;margin-left:4px">(${count})</span>
-      </div>`;
-    });
-    
     html += `</div></div></div>`;
   }
   
-  // ---- STAFFING PLAN TABLE ----
+  // ---- STAFFING PLAN TABLE with move handles ----
   html += `<div class="card"><div class="card-header">
     <h3>Staffing Plan — ${center}</h3>
     <div style="display:flex;gap:8px;align-items:center">
@@ -2016,6 +2000,7 @@ async function renderStaffingPlan() {
   </div><div class="card-body"><div class="table-scroll">
     <table class="data-table" style="font-size:11px">
       <thead><tr>
+        ${canEdit ? '<th style="width:30px"></th>' : ''}
         <th>Classroom</th><th>Role</th><th>Name</th><th>Start Date</th><th>Schedule</th>
         <th>Orientation</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Refresh</th>
         <th>CCBC</th><th>Fingerprint</th><th>Eligible</th><th>Abuse/Neglect</th>
@@ -2024,9 +2009,16 @@ async function renderStaffingPlan() {
         ${canEdit ? '<th>Actions</th>' : ''}
       </tr></thead><tbody>`;
   
+  // Helper for highlighting empty compliance cells
+  function cc(val, required) {
+    const formatted = fmtDate(val);
+    if (!formatted && required) return '<td style="background:#FFF3CD;color:var(--warning);font-weight:600;text-align:center">⚠</td>';
+    return '<td>' + formatted + '</td>';
+  }
+  
   orderedClassrooms.forEach(classroom => {
     const staff = classroomMap[classroom] || [];
-    const colSpan = canEdit ? 20 : 19;
+    const colSpan = canEdit ? 21 : 19;
     html += `<tr style="background:var(--navy);color:white">
       <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">${classroom}</td>
     </tr>`;
@@ -2036,23 +2028,24 @@ async function renderStaffingPlan() {
     }
     
     staff.forEach(s => {
-      html += `<tr>
+      html += `<tr data-sp-id="${s.id}">
+        ${canEdit ? `<td style="text-align:center;cursor:pointer" title="Move to different classroom" onclick="moveStaffEntry(${s.id},'${s.first_name} ${s.last_name}')"><span style="font-size:14px;cursor:grab">☰</span></td>` : ''}
         <td></td>
         <td><strong>${s.role_in_room || ''}</strong></td>
         <td style="white-space:nowrap">${s.first_name || ''} ${s.last_name || ''}</td>
         <td>${fmtDate(s.emp_start_date)}</td>
         <td style="font-size:10px">${s.emp_schedule || ''}</td>
-        <td>${fmtDate(s.orientation_date)}</td>
-        <td>${fmtDate(s.cpr_first_aid_date)}</td>
-        <td>${fmtDate(s.health_safety_abc_date)}</td>
-        <td>${fmtDate(s.health_safety_refresher)}</td>
-        <td>${fmtDate(s.ccbc_consent_date)}</td>
-        <td>${fmtDate(s.fingerprinting_date)}</td>
-        <td>${fmtDate(s.date_eligible)}</td>
-        <td>${fmtDate(s.abuse_neglect_statement)}</td>
-        <td>${fmtDate(s.last_evaluation)}</td>
-        <td>${fmtDate(s.date_promoted_lead)}</td>
-        <td>${fmtDate(s.date_assigned_room)}</td>
+        ${cc(s.orientation_date, true)}
+        ${cc(s.cpr_first_aid_date, true)}
+        ${cc(s.health_safety_abc_date, true)}
+        ${cc(s.health_safety_refresher, true)}
+        ${cc(s.ccbc_consent_date, true)}
+        ${cc(s.fingerprinting_date, true)}
+        ${cc(s.date_eligible, true)}
+        ${cc(s.abuse_neglect_statement, true)}
+        ${cc(s.last_evaluation, false)}
+        ${cc(s.date_promoted_lead, false)}
+        ${cc(s.date_assigned_room, false)}
         <td style="font-size:10px">${s.education || ''}</td>
         <td style="font-size:10px">${s.semester_hours || ''}</td>
         <td style="font-size:10px">${s.infant_toddler_training || ''}</td>
@@ -2066,58 +2059,66 @@ async function renderStaffingPlan() {
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
-  
-  // Setup drag-and-drop after DOM renders
-  setTimeout(setupDragDrop, 50);
 }
 
-function setupDragDrop() {
-  const chips = document.querySelectorAll('.drag-chip');
-  const zones = document.querySelectorAll('.drop-zone');
-  if (!chips.length || !zones.length) return;
+// Move staff to a different classroom via modal
+function moveStaffEntry(spId, empName) {
+  const classrooms = window._spClassrooms || [];
+  const center = window._spCenter || '';
   
-  chips.forEach(chip => {
-    chip.addEventListener('dragstart', e => {
-      e.dataTransfer.setData('text/plain', chip.dataset.empId);
-      e.dataTransfer.effectAllowed = 'move';
-      chip.style.opacity = '0.4';
-    });
-    chip.addEventListener('dragend', () => { chip.style.opacity = '1'; });
-  });
-  
-  zones.forEach(zone => {
-    zone.addEventListener('dragover', e => {
-      e.preventDefault();
-      zone.style.borderColor = 'var(--gold)';
-      zone.style.background = 'var(--gold-pale)';
-      zone.style.color = 'var(--navy)';
-    });
-    zone.addEventListener('dragleave', () => {
-      zone.style.borderColor = 'var(--gray-300)';
-      zone.style.background = 'transparent';
-      zone.style.color = 'var(--gray-400)';
-    });
-    zone.addEventListener('drop', async e => {
-      e.preventDefault();
-      zone.style.borderColor = 'var(--success)'; zone.style.background = 'var(--success-bg)'; zone.style.color = 'var(--success)';
-      const empId = e.dataTransfer.getData('text/plain');
-      const classroom = zone.dataset.classroom;
-      const center = window._spCenter;
-      const chip = document.getElementById('chip-' + empId);
-      const role = prompt('Assign ' + (chip?.dataset.empName||'') + ' to ' + classroom + '.\n\nRole:', 'Assistant');
-      if (!role) { zone.style.borderColor='var(--gray-300)';zone.style.background='transparent';zone.style.color='var(--gray-400)'; return; }
-      try {
-        await api('/api/staffing-plan', { method: 'POST', body: {
-          employee_id: parseInt(empId), center, classroom, role_in_room: role,
-          orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
-          ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
-          last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
-        }});
-        await loadEmployees();
-        renderStaffingPlan();
-      } catch(err) { alert('Error: ' + err.message); }
-    });
-  });
+  let html = `<div class="modal-header"><h3>Move ${empName}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">Select the new classroom and role for ${empName}. All compliance data will be preserved.</p>
+      <div class="form-row">
+        <div class="form-group"><label>New Classroom</label><select id="moveClassroom" style="font-size:14px">
+          ${classrooms.map(c => `<option value="${c}">${c}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="moveRole" style="font-size:14px">
+          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+          <option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doMoveStaff(${spId},'${center.replace(/'/g,"\\'")}')">Move</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doMoveStaff(spId, center) {
+  try {
+    // Get the current entry to preserve all compliance data
+    let spData = await api('/api/staffing-plan');
+    const entry = spData.find(s => s.id === spId);
+    if (!entry) { alert('Entry not found'); return; }
+    
+    const newClassroom = document.getElementById('moveClassroom').value;
+    const newRole = document.getElementById('moveRole').value;
+    
+    await api(`/api/staffing-plan/${spId}`, { method: 'PUT', body: {
+      employee_id: entry.employee_id, center,
+      classroom: newClassroom, role_in_room: newRole,
+      orientation_date: datVal(entry.orientation_date) || null,
+      cpr_first_aid_date: datVal(entry.cpr_first_aid_date) || null,
+      health_safety_abc_date: datVal(entry.health_safety_abc_date) || null,
+      health_safety_refresher: datVal(entry.health_safety_refresher) || null,
+      ccbc_consent_date: datVal(entry.ccbc_consent_date) || null,
+      fingerprinting_date: datVal(entry.fingerprinting_date) || null,
+      date_eligible: datVal(entry.date_eligible) || null,
+      abuse_neglect_statement: datVal(entry.abuse_neglect_statement) || null,
+      last_evaluation: datVal(entry.last_evaluation) || null,
+      date_promoted_lead: datVal(entry.date_promoted_lead) || null,
+      date_assigned_room: datVal(entry.date_assigned_room) || null,
+      education: entry.education || null,
+      semester_hours: entry.semester_hours || null,
+      infant_toddler_training: entry.infant_toddler_training || null
+    }});
+    closeModal();
+    await loadEmployees();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 async function quickAssign(empId, center) {
