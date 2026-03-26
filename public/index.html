@@ -554,7 +554,7 @@ function buildNav() {
 }
 
 function getNextReportDue() {
-  // Due date is 2 business days after pay period ends
+  if (!payPeriod || !payPeriod.end) return '...';
   const endDate = new Date(payPeriod.end + 'T12:00:00');
   let dueDate = new Date(endDate);
   let bizDays = 0;
