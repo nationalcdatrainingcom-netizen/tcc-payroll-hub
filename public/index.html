@@ -1265,7 +1265,10 @@ async function saveEmployee() {
 // ========================
 async function renderTimeOff() {
   const el = document.getElementById('pageContent');
-  const filtered = currentUser.role === 'director' ? employees.filter(e => e.center === currentUser.center) : employees;
+  const isDirector = currentUser.role === 'director';
+  const isPayroll = ['owner','payroll'].includes(currentUser.role);
+  const filtered = isDirector ? employees.filter(e => e.center === currentUser.center) : employees;
+  const center = isDirector ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
   
   // Get dates in current pay period
   const start = new Date(payPeriod.start + 'T12:00:00');
@@ -1278,7 +1281,6 @@ async function renderTimeOff() {
   // Load time off entries
   const entries = {};
   try {
-    // We need to load entries for the months covered by this pay period
     const months = new Set();
     dates.forEach(d => months.add(`${d.getMonth()+1}-${d.getFullYear()}`));
     for (const my of months) {
@@ -1288,8 +1290,61 @@ async function renderTimeOff() {
     }
   } catch(e) {}
   
-  let html = `<div class="card"><div class="card-header"><h3>Time Off — ${payPeriod.label}</h3>
-    <div style="font-size:12px;color:var(--gray-400)">Click a cell to toggle: Empty → Paid (P) → Unpaid (U) → Clear</div>
+  // Load payroll period status for this center
+  let ppStatus = {};
+  try {
+    const allStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`);
+    ppStatus = (allStatus.periods || {})[center] || {};
+  } catch(e) {}
+  
+  const isSubmitted = !!ppStatus.timeoff_submitted;
+  const isLockedByJared = !!ppStatus.payroll_accessed_at;
+  const changePending = !!ppStatus.change_request_pending;
+  const isEditable = !isSubmitted || (isPayroll);
+  
+  // Center tabs for non-directors
+  let html = '';
+  if (!isDirector) {
+    html += `<div class="center-tabs">`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOff()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  // Status banner
+  if (isSubmitted && !changePending) {
+    html += `<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <span style="font-size:14px;font-weight:700;color:var(--success)">✅ Time Off Report Submitted</span>
+        <span style="font-size:12px;color:var(--gray-600);margin-left:12px">by ${ppStatus.timeoff_submitted_by || 'Director'} on ${ppStatus.timeoff_submitted_at ? new Date(ppStatus.timeoff_submitted_at).toLocaleDateString() : ''}</span>
+      </div>
+      <div>
+      ${isDirector && !isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>` : ''}
+      ${isDirector && isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="requestTimeOffChange()" style="color:var(--warning)">Request Change</button>` : ''}
+      </div>
+    </div>`;
+  }
+  
+  if (changePending) {
+    html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <span style="font-size:14px;font-weight:700;color:var(--warning)">⏳ Change Request Pending</span>
+      <span style="font-size:12px;color:var(--gray-600);margin-left:12px">${ppStatus.change_request_reason || ''}</span>
+      ${isPayroll ? `<div style="margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="approveTimeOffChange()">Approve (Unlock)</button>
+        <button class="btn btn-outline btn-sm" onclick="denyTimeOffChange()" style="margin-left:8px">Deny</button>
+      </div>` : ''}
+    </div>`;
+  }
+  
+  if (isSubmitted && isLockedByJared && !changePending && isDirector) {
+    html += `<div style="background:var(--gray-100);border:1px solid var(--gray-300);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+      🔒 Payroll processing has begun. To make changes, click "Request Change" above. Jared will need to approve before edits can be made.
+    </div>`;
+  }
+  
+  html += `<div class="card"><div class="card-header"><h3>Time Off — ${payPeriod.label} — ${center}</h3>
+    <div style="font-size:12px;color:var(--gray-400)">${isEditable ? 'Click a cell to toggle: Empty → Paid (P) → Unpaid (U) → Clear' : 'Read-only — report has been submitted'}</div>
   </div><div class="card-body"><div class="table-scroll">
     <table class="calendar-grid"><thead><tr><th class="name-col">Employee</th>`;
   
@@ -1300,7 +1355,9 @@ async function renderTimeOff() {
   });
   html += `</tr></thead><tbody>`;
   
-  filtered.forEach(emp => {
+  const centerFiltered = isDirector ? filtered : filtered.filter(e => e.center === center);
+  
+  centerFiltered.forEach(emp => {
     html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
     dates.forEach(d => {
       const ds = d.toISOString().split('T')[0];
@@ -1316,15 +1373,94 @@ async function renderTimeOff() {
         else { btnClass = 'unpaid'; btnText = 'U'; }
       }
       
-      html += `<td class="${isWknd?'weekend':''}">
-        <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)" title="${emp.first_name} ${emp.last_name} — ${d.toLocaleDateString()}">${btnText}</button>
-      </td>`;
+      if (isEditable) {
+        html += `<td class="${isWknd?'weekend':''}">
+          <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)" title="${emp.first_name} ${emp.last_name} — ${d.toLocaleDateString()}">${btnText}</button>
+        </td>`;
+      } else {
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
     });
     html += `</tr>`;
   });
   
-  html += `</tbody></table></div></div></div>`;
+  html += `</tbody></table></div>`;
+  
+  // Submit button for directors
+  if (isDirector && !isSubmitted) {
+    html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-200);text-align:right">
+      <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px">✅ Submit Time Off Report</button>
+      <div style="font-size:11px;color:var(--gray-400);margin-top:6px">Once submitted, Jared can begin processing payroll. You can unsubmit if payroll processing hasn't started yet.</div>
+    </div>`;
+  }
+  
+  html += `</div></div>`;
   el.innerHTML = html;
+}
+
+async function submitTimeOff() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  if (!confirm('Submit the time off report for ' + center + ' for the period ' + payPeriod.label + '?\n\nThis tells Jared the data is ready for payroll processing.')) return;
+  try {
+    await api('/api/payroll-workflow/submit-timeoff', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center
+    }});
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function unsubmitTimeOff() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  try {
+    const res = await fetch('/api/payroll-workflow/unsubmit-timeoff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period_start: payPeriod.start, period_end: payPeriod.end, center })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (data.error === 'locked') {
+        alert('Payroll processing has already begun. Use "Request Change" instead.');
+      } else { alert(data.message || data.error); }
+      return;
+    }
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function requestTimeOffChange() {
+  const reason = prompt('Describe what needs to change and why:');
+  if (!reason) return;
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  try {
+    await api('/api/payroll-workflow/request-timeoff-change', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center, reason
+    }});
+    alert('Change request sent. Jared will review and approve or deny.');
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function approveTimeOffChange() {
+  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  if (!confirm('Approve the change request and unlock time off for editing?')) return;
+  try {
+    await api('/api/payroll-workflow/approve-timeoff-change', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center
+    }});
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function denyTimeOffChange() {
+  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  if (!confirm('Deny this change request?')) return;
+  try {
+    await api('/api/payroll-workflow/deny-timeoff-change', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center
+    }});
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 async function toggleTimeOff(empId, date, btn) {
