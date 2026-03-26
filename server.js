@@ -203,6 +203,22 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS payroll_accessed_at TIMESTAMP`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS timeoff_change_requests (
+      id SERIAL PRIMARY KEY,
+      employee_id INTEGER REFERENCES employees(id),
+      entry_date DATE NOT NULL,
+      requested_type VARCHAR(1),
+      requested_by INTEGER REFERENCES users(id),
+      requested_by_name VARCHAR(200),
+      reason TEXT,
+      status VARCHAR(20) DEFAULT 'pending',
+      reviewed_by VARCHAR(200),
+      reviewed_at TIMESTAMP,
+      created_at TIMESTAMP DEFAULT NOW()
+    )
+  `);
 
   // Seed default users if none exist
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
@@ -307,17 +323,14 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
   const totalAvailableDays = totalAvailableHours / hoursPerDay;
   
-  // PTO used this year
-  const usedResult = await pool.query(
-    `SELECT COUNT(*) as days_used FROM time_off_entries 
-     WHERE employee_id = $1 AND entry_type = 'P' AND EXTRACT(YEAR FROM entry_date) = $2`,
-    [empId, currentYear]
-  );
-  const daysUsed = parseInt(usedResult.rows[0].days_used);
-  const hoursUsed = daysUsed * hoursPerDay;
+  // PTO used this year — from QuickBooks payroll imports (actual paid PTO)
+  const qbUsed = parseFloat(carryoverHours === undefined ? 0 : 
+    (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
+  const hoursUsed = qbUsed;
+  const daysUsed = Math.round(hoursUsed / hoursPerDay * 10) / 10;
   
   // Remaining
-  const remainingHours = Math.max(0, totalAvailableHours - hoursUsed);
+  const remainingHours = totalAvailableHours - hoursUsed;
   const remainingDays = remainingHours / hoursPerDay;
   
   // Unpaid days last 6 months
@@ -737,6 +750,18 @@ app.get('/api/time-off', requireAuth, async (req, res) => {
 app.post('/api/time-off', requireAuth, async (req, res) => {
   try {
     const { employee_id, entry_date, entry_type, notes } = req.body;
+    const user = req.session.user;
+    
+    // Check if this date is in a past pay period - directors can't edit past periods
+    if (user.role === 'director') {
+      const currentPP = getPayPeriod(new Date());
+      const entryD = new Date(entry_date + 'T12:00:00');
+      const ppStart = new Date(currentPP.start + 'T12:00:00');
+      if (entryD < ppStart) {
+        return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods. Submit a change request.' });
+      }
+    }
+    
     const result = await pool.query(
       `INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes)
        VALUES ($1, $2, $3, $4, $5)
@@ -752,8 +777,172 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
 
 app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
   try {
+    // Check if director is trying to delete from past period
+    if (req.session.user.role === 'director') {
+      const entry = await pool.query('SELECT entry_date FROM time_off_entries WHERE id = $1', [req.params.id]);
+      if (entry.rows.length > 0) {
+        const currentPP = getPayPeriod(new Date());
+        const entryD = new Date(entry.rows[0].entry_date);
+        const ppStart = new Date(currentPP.start + 'T12:00:00');
+        if (entryD < ppStart) {
+          return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods.' });
+        }
+      }
+    }
     await pool.query('DELETE FROM time_off_entries WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Time off change requests (for past periods)
+app.post('/api/timeoff-change-request', requireAuth, async (req, res) => {
+  try {
+    const { employee_id, entry_date, requested_type, reason } = req.body;
+    const user = req.session.user;
+    await pool.query(
+      `INSERT INTO timeoff_change_requests (employee_id, entry_date, requested_type, requested_by, requested_by_name, reason)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [employee_id, entry_date, requested_type, user.id, user.full_name, reason]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/timeoff-change-requests', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT cr.*, e.first_name, e.last_name, e.center
+       FROM timeoff_change_requests cr JOIN employees e ON cr.employee_id = e.id
+       WHERE cr.status = 'pending' ORDER BY cr.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/timeoff-change-requests/:id/approve', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const cr = await pool.query('SELECT * FROM timeoff_change_requests WHERE id = $1', [req.params.id]);
+    if (cr.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const r = cr.rows[0];
+    
+    if (r.requested_type) {
+      // Upsert the time off entry
+      await pool.query(
+        `INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes)
+         VALUES ($1, $2, $3, $4, 'Approved change request')
+         ON CONFLICT (employee_id, entry_date) DO UPDATE SET entry_type = $3, notes = 'Approved change request'`,
+        [r.employee_id, r.entry_date, r.requested_type, req.session.user.id]
+      );
+    } else {
+      // Delete the entry (requested_type is null = remove)
+      await pool.query('DELETE FROM time_off_entries WHERE employee_id = $1 AND entry_date = $2', [r.employee_id, r.entry_date]);
+    }
+    
+    await pool.query(
+      `UPDATE timeoff_change_requests SET status = 'approved', reviewed_by = $1, reviewed_at = NOW() WHERE id = $2`,
+      [req.session.user.full_name, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    await pool.query(
+      `UPDATE timeoff_change_requests SET status = 'denied', reviewed_by = $1, reviewed_at = NOW() WHERE id = $2`,
+      [req.session.user.full_name, req.params.id]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// QuickBooks payroll summary upload - parses PTO hours and adds to employee pto_hours_used_qb
+app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
+  try {
+    const XLSX = require('xlsx');
+    const wb = XLSX.read(req.file.buffer);
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
+    
+    // Parse: skip non-PTO pay types
+    const skipTypes = new Set(['Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions','Health Insurance','Salary','Bonus','']);
+    
+    let currentName = null;
+    const ptoPaid = {}; // name -> hours
+    let dateRange = '';
+    
+    for (let i = 0; i < data.length; i++) {
+      const row = data[i];
+      const col0 = String(row[0] || '').trim();
+      const col1 = String(row[1] || '').trim();
+      const col2 = parseFloat(row[2]) || 0;
+      
+      // Capture date range
+      if (col0.startsWith('From ')) dateRange = col0;
+      
+      if (col0 && col0.includes(',') && col1 === 'Gross') {
+        currentName = col0;
+      }
+      
+      if (currentName && col1 && !skipTypes.has(col1) && col2 > 0) {
+        // This is a PTO-type pay entry
+        if (!ptoPaid[currentName]) ptoPaid[currentName] = 0;
+        ptoPaid[currentName] += col2;
+      }
+    }
+    
+    // Remove Wilson Alexia totals row (absurdly high hours)
+    for (const name of Object.keys(ptoPaid)) {
+      if (ptoPaid[name] > 200) {
+        delete ptoPaid[name]; // clearly a totals row
+      }
+    }
+    
+    // Match to employees and add to pto_hours_used_qb
+    let matched = 0;
+    const results = [];
+    
+    for (const [name, hours] of Object.entries(ptoPaid)) {
+      const parts = name.split(',').map(s => s.trim());
+      if (parts.length < 2) continue;
+      const last = parts[0];
+      const first = parts[1].split(' ')[0]; // strip middle initial
+      
+      const emp = await pool.query(
+        `SELECT id, first_name, last_name, pto_hours_used_qb FROM employees
+         WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%')
+         AND LOWER(first_name) LIKE LOWER($2) || '%'
+         AND is_active = TRUE LIMIT 1`,
+        [last, first]
+      );
+      
+      if (emp.rows.length > 0) {
+        const e = emp.rows[0];
+        const newTotal = parseFloat(e.pto_hours_used_qb || 0) + hours;
+        await pool.query('UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2', [newTotal, e.id]);
+        results.push({ name: `${e.last_name}, ${e.first_name}`, hours, newTotal });
+        matched++;
+      } else {
+        results.push({ name, hours, newTotal: null, error: 'Not found' });
+      }
+    }
+    
+    res.json({ 
+      dateRange, 
+      totalEmployeesWithPTO: Object.keys(ptoPaid).length,
+      matched, 
+      results 
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
