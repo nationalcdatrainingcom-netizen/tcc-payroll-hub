@@ -197,6 +197,12 @@ async function initDB() {
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_date DATE`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_reason TEXT`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_by VARCHAR(200)`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted BOOLEAN DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted_by VARCHAR(200)`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted_at TIMESTAMP`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS payroll_accessed_at TIMESTAMP`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
 
   // Seed default users if none exist
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
@@ -1300,6 +1306,122 @@ app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) =
       [period_start, period_end, center, user.id, user.full_name, signature_name]
     );
     
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director submits time off report as complete
+app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    const user = req.session.user;
+    
+    // Ensure period exists
+    await pool.query(
+      `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
+       VALUES ($1, $2, $2, $3)
+       ON CONFLICT (period_start, period_end, center) DO NOTHING`,
+      [period_start, period_end, center]
+    );
+    
+    await pool.query(
+      `UPDATE payroll_periods SET timeoff_submitted = TRUE, timeoff_submitted_by = $1, timeoff_submitted_at = NOW(), change_request_pending = FALSE
+       WHERE period_start = $2 AND period_end = $3 AND center = $4`,
+      [user.full_name, period_start, period_end, center]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director unsubmits time off (only if Jared hasn't accessed it yet)
+app.post('/api/payroll-workflow/unsubmit-timeoff', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    
+    // Check if Jared has accessed it
+    const pp = await pool.query(
+      `SELECT payroll_accessed_at, payroll_closed FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
+    
+    if (pp.rows.length > 0 && pp.rows[0].payroll_accessed_at) {
+      return res.status(403).json({ error: 'locked', message: 'Payroll processing has already begun. Submit a change request for Jared to approve.' });
+    }
+    
+    await pool.query(
+      `UPDATE payroll_periods SET timeoff_submitted = FALSE, timeoff_submitted_by = NULL, timeoff_submitted_at = NULL
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Director requests a change after Jared has started processing
+app.post('/api/payroll-workflow/request-timeoff-change', requireAuth, async (req, res) => {
+  try {
+    const { period_start, period_end, center, reason } = req.body;
+    const user = req.session.user;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET change_request_pending = TRUE, change_request_reason = $1
+       WHERE period_start = $2 AND period_end = $3 AND center = $4`,
+      [user.full_name + ': ' + reason, period_start, period_end, center]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Jared approves a change request (unlocks time off for editing)
+app.post('/api/payroll-workflow/approve-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET timeoff_submitted = FALSE, change_request_pending = FALSE, change_request_reason = NULL, payroll_accessed_at = NULL
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Jared denies a change request
+app.post('/api/payroll-workflow/deny-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET change_request_pending = FALSE, change_request_reason = NULL
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mark payroll as accessed (called when Jared views payroll report)
+app.post('/api/payroll-workflow/mark-accessed', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    
+    await pool.query(
+      `UPDATE payroll_periods SET payroll_accessed_at = COALESCE(payroll_accessed_at, NOW())
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
