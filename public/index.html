@@ -729,6 +729,11 @@ async function loadPTOSummary() {
     
     area.innerHTML = `<em style="color:var(--gray-400)">Loading PTO data for ${filtered.length} employees...</em>`;
     
+    // Hide Jay & Mary from PTO summary for everyone except Mary
+    if (currentUser.username !== 'mary') {
+      filtered = filtered.filter(e => !isMaryOrJay(e));
+    }
+    
     // Load detail for ALL employees (no slice limit)
     const details = [];
     for (const e of filtered) {
@@ -1708,6 +1713,13 @@ async function renderTimeOffYearly() {
 function isAdminStaff(emp) {
   const key = (emp.last_name || '').toLowerCase();
   return ['wardlaw'].includes(key) && ['mary','jay','jared','kelsey'].some(n => (emp.first_name||'').toLowerCase().startsWith(n));
+}
+
+// Helper: check if employee is Mary or Jay Wardlaw (hidden from PTO summary for non-owners)
+function isMaryOrJay(emp) {
+  const ln = (emp.last_name || '').toLowerCase();
+  const fn = (emp.first_name || '').toLowerCase();
+  return ln === 'wardlaw' && (fn.startsWith('mary') || fn.startsWith('jay'));
 }
 
 // ========================
