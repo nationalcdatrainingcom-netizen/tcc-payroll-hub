@@ -1537,8 +1537,14 @@ async function renderTimeOffCalendar() {
   const el = document.getElementById('pageContent');
   const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
   const monthName = new Date(currentYear, currentMonth - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const isDir = currentUser.role === 'director';
+  const isAdmin = ['owner','payroll'].includes(currentUser.role);
   
-  const filtered = currentUser.role === 'director' ? employees.filter(e => e.center === currentUser.center) : employees;
+  // Determine if this month is in a past pay period
+  const currentPP = payPeriod || {};
+  const ppStartDate = currentPP.start ? new Date(currentPP.start + 'T12:00:00') : new Date();
+  
+  const filtered = isDir ? employees.filter(e => e.center === currentUser.center) : employees;
   
   // Load entries
   const entries = {};
@@ -1553,13 +1559,21 @@ async function renderTimeOffCalendar() {
     <button onclick="changeMonth(1)">▶</button>
   </div>`;
   
-  if (currentUser.role !== 'director') {
+  if (!isDir) {
     html += `<div class="center-tabs">
       <div class="center-tab ${selectedCenter==='all'?'active':''}" onclick="selectedCenter='all';renderTimeOffCalendar()">All</div>`;
     CENTERS.forEach(c => {
       html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOffCalendar()">${c}</div>`;
     });
     html += `</div>`;
+  }
+  
+  if (isDir) {
+    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">This is a read-only view. To enter time off for the current pay period, use "Process Payroll." To request changes to past periods, click a cell to submit a change request.</div>`;
+  } else if (isAdmin) {
+    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">Click a cell to toggle: Empty → P → U → Clear</div>`;
+  } else {
+    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">Read-only view.</div>`;
   }
   
   html += `<div class="card"><div class="card-body"><div class="table-scroll">
@@ -1585,22 +1599,69 @@ async function renderTimeOffCalendar() {
       const key = `${emp.id}-${ds}`;
       const entry = entries[key];
       
-      let btnClass = 'empty';
-      let btnText = '·';
+      let btnClass = 'empty', btnText = '·';
       if (entry) {
-        if (entry.entry_type === 'P') { btnClass = 'paid'; btnText = 'P'; }
-        else { btnClass = 'unpaid'; btnText = 'U'; }
+        btnClass = entry.entry_type === 'P' ? 'paid' : 'unpaid';
+        btnText = entry.entry_type;
       }
       
-      html += `<td class="${isWknd?'weekend':''}">
-        <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
-      </td>`;
+      if (isAdmin) {
+        // Mary/Jared can edit any period
+        html += `<td class="${isWknd?'weekend':''}">
+          <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
+        </td>`;
+      } else if (isDir) {
+        // Directors: read-only but can click to request changes for past periods
+        const isPast = dt < ppStartDate;
+        if (isPast) {
+          html += `<td class="${isWknd?'weekend':''}" style="cursor:pointer" onclick="requestCalendarChange(${emp.id},'${ds}','${emp.first_name} ${emp.last_name}')">
+            <span style="font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</span>
+          </td>`;
+        } else {
+          html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+        }
+      } else {
+        // HR: read-only
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
     }
     html += `</tr>`;
   });
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
+}
+
+function requestCalendarChange(empId, date, empName) {
+  const emp = employees.find(e => e.id === empId);
+  let html = `<div class="modal-header"><h3>Request Time Off Change</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;margin-bottom:12px"><strong>${empName}</strong> — ${new Date(date+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}</p>
+      <p style="font-size:12px;color:var(--gray-500);margin-bottom:16px">This date is in a past pay period. Your request will be sent to Mary/Jared for approval.</p>
+      <div class="form-group"><label>Change to:</label><select id="crType">
+        <option value="P">Paid (P)</option>
+        <option value="U">Unpaid (U)</option>
+        <option value="">Remove entry</option>
+      </select></div>
+      <div class="form-group"><label>Reason</label><textarea id="crReason" rows="2" placeholder="Why does this need to change?"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCalendarChange(${empId},'${date}')">Submit Request</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function submitCalendarChange(empId, date) {
+  const type = document.getElementById('crType').value || null;
+  const reason = document.getElementById('crReason').value;
+  if (!reason) { alert('Please enter a reason.'); return; }
+  try {
+    await api('/api/timeoff-change-request', { method: 'POST', body: { employee_id: empId, entry_date: date, requested_type: type, reason } });
+    closeModal();
+    alert('Change request submitted. Mary/Jared will review it.');
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 function changeMonth(dir) {
@@ -2057,6 +2118,54 @@ async function renderPayroll() {
     }
   }
   
+  // ---- QuickBooks Payroll Summary Upload (Step 5) ----
+  if (isPayroll) {
+    html += `<div class="card" style="margin-top:20px"><div class="card-header"><h3>Step 5: Upload QuickBooks Payroll Summary</h3></div>
+      <div class="card-body">
+        <div style="background:var(--gold-pale);border:1px solid var(--gold);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--gray-700)">
+          <strong>Instructions:</strong><br>
+          1. In QuickBooks, go to <strong>Reports → Standard Reports → Payroll Summary by Employee</strong><br>
+          2. Select the <strong>last pay date</strong> for this period<br>
+          3. Click <strong>Customize</strong> → What to include: <strong>All Employees, All Locations</strong><br>
+          4. Group by <strong>Employee</strong>, select <strong>Totals and Details</strong><br>
+          5. Select <strong>Other Pay, Net Pay, and Hours</strong><br>
+          6. Click <strong>Run Report</strong>, then <strong>Apply Changes</strong><br>
+          7. <strong>Export to Excel</strong> and upload below
+        </div>
+        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates PTO used (paid time off hours) on the PTO Summary. All hours that are not Regular Pay, Overtime, or Salary are counted as PTO used.</p>
+        <input type="file" id="qbFile" accept=".xls,.xlsx" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="uploadQBPayroll()">Upload QuickBooks Report</button>
+        <div id="qbUploadResult" style="margin-top:12px"></div>
+      </div></div>`;
+    
+    // ---- Pending Time Off Change Requests ----
+    try {
+      const changeReqs = await api('/api/timeoff-change-requests');
+      if (changeReqs.length > 0) {
+        html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--warning)"><div class="card-header"><h3>⚠️ Pending Time Off Change Requests (${changeReqs.length})</h3></div>
+          <div class="card-body"><table class="data-table"><thead><tr>
+            <th>Employee</th><th>Center</th><th>Date</th><th>Requested</th><th>Reason</th><th>Requested By</th><th>Actions</th>
+          </tr></thead><tbody>`;
+        changeReqs.forEach(cr => {
+          const typeLabel = cr.requested_type === 'P' ? 'Paid (P)' : cr.requested_type === 'U' ? 'Unpaid (U)' : 'Remove';
+          html += `<tr>
+            <td><strong>${cr.last_name}, ${cr.first_name}</strong></td>
+            <td>${cr.center}</td>
+            <td>${fmtDate(cr.entry_date)}</td>
+            <td><span style="font-weight:700;color:${cr.requested_type==='P'?'var(--info)':'var(--danger)'}">${typeLabel}</span></td>
+            <td style="font-size:11px">${cr.reason||''}</td>
+            <td style="font-size:11px">${cr.requested_by_name}</td>
+            <td style="white-space:nowrap">
+              <button class="btn btn-success btn-sm" onclick="approveChangeReq(${cr.id})">Approve</button>
+              <button class="btn btn-outline btn-sm" onclick="denyChangeReq(${cr.id})">Deny</button>
+            </td>
+          </tr>`;
+        });
+        html += `</tbody></table></div></div>`;
+      }
+    } catch(e) {}
+  }
+  
   // Signature log
   if (sigs.length > 0) {
     html += `<div class="card"><div class="card-header"><h3>Signature Log</h3></div><div class="card-body">
@@ -2155,6 +2264,55 @@ async function closePayroll() {
   if (!confirm('Close payroll for ALL centers for this period?')) return;
   await api('/api/payroll-workflow/payroll-close', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, signature_name: name } });
   renderPayroll();
+}
+
+async function uploadQBPayroll() {
+  const fileInput = document.getElementById('qbFile');
+  const resultDiv = document.getElementById('qbUploadResult');
+  if (!fileInput.files[0]) { alert('Select the QuickBooks Excel file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  
+  resultDiv.innerHTML = '<em>Processing QuickBooks report...</em>';
+  try {
+    const res = await fetch('/api/import-qb-payroll', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    
+    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="font-weight:700;color:#27500A;margin-bottom:8px">✅ QuickBooks report processed</div>
+      <div style="font-size:12px;color:#3B6D11">${data.dateRange}</div>
+      <div style="font-size:12px;color:#3B6D11">${data.totalEmployeesWithPTO} employees with PTO hours, ${data.matched} matched</div>
+    </div>`;
+    
+    if (data.results && data.results.length > 0) {
+      html += `<table class="data-table" style="font-size:12px"><thead><tr><th>Employee</th><th>PTO This Period</th><th>New YTD Total</th></tr></thead><tbody>`;
+      data.results.forEach(r => {
+        html += `<tr><td>${r.name}</td><td style="font-weight:600">${r.hours}h</td>
+          <td>${r.newTotal !== null ? r.newTotal + 'h' : '<span style="color:var(--danger)">' + (r.error||'Error') + '</span>'}</td></tr>`;
+      });
+      html += `</tbody></table>`;
+    }
+    
+    resultDiv.innerHTML = html;
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
+}
+
+async function approveChangeReq(id) {
+  if (!confirm('Approve this change request? The time off entry will be updated.')) return;
+  try {
+    await api(`/api/timeoff-change-requests/${id}/approve`, { method: 'POST' });
+    renderPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function denyChangeReq(id) {
+  if (!confirm('Deny this change request?')) return;
+  try {
+    await api(`/api/timeoff-change-requests/${id}/deny`, { method: 'POST' });
+    renderPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 async function loadPayrollReport() {
