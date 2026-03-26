@@ -501,12 +501,20 @@ async function showApp() {
 function buildNav() {
   const role = currentUser.role;
   let items = [
-    { id: 'dashboard', icon: '📊', label: 'A&P Dashboard', roles: ['owner','payroll','hr','director'] },
+    { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['owner','payroll','hr','director'] },
     { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll','hr','director'] },
-    { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll','hr','director'] },
-    { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll','hr','director'] },
-    { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll','hr','director'] },
   ];
+  
+  if (role === 'director') {
+    items.push({ section: 'Director Payroll Processing' });
+    items.push({ id: 'director-payroll', icon: '📋', label: 'Process Payroll', roles: ['director'], showDue: true });
+    items.push({ id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['director'] });
+    items.push({ id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['director'] });
+  } else {
+    items.push({ id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll','hr'] });
+    items.push({ id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll','hr'] });
+    items.push({ id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll','hr'] });
+  }
   
   if (['owner','payroll','hr'].includes(role)) {
     items.push({ section: 'Payroll' });
@@ -531,6 +539,9 @@ function buildNav() {
   items.forEach(item => {
     if (item.section) {
       html += `<div class="nav-section">${item.section}</div>`;
+      if (item.section === 'Director Payroll Processing') {
+        html += `<div style="padding:4px 20px 8px;font-size:10px;color:var(--gold)">Next report due: <strong>${getNextReportDue()}</strong></div>`;
+      }
     } else if (item.roles.includes(role)) {
       html += `<div class="nav-item" data-page="${item.id}" onclick="navigate('${item.id}')">
         <span class="icon">${item.icon}</span><span>${item.label}</span>
@@ -542,16 +553,30 @@ function buildNav() {
   document.getElementById('sidebarNav').innerHTML = html;
 }
 
+function getNextReportDue() {
+  // Due date is 2 business days after pay period ends
+  const endDate = new Date(payPeriod.end + 'T12:00:00');
+  let dueDate = new Date(endDate);
+  let bizDays = 0;
+  while (bizDays < 2) {
+    dueDate.setDate(dueDate.getDate() + 1);
+    const dow = dueDate.getDay();
+    if (dow !== 0 && dow !== 6) bizDays++;
+  }
+  return dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function navigate(page) {
   currentPage = page;
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   
   const titles = {
-    'dashboard': 'ATTENDANCE & PAYROLL SUITE Dashboard',
+    'dashboard': 'PTO Summary',
     'employees': 'Employee Roster',
     'timeoff': 'Enter Time Off',
     'timeoff-calendar': 'Monthly View Time Off',
     'timeoff-yearly': 'Yearly View Time Off',
+    'director-payroll': 'Director Payroll Processing',
     'payroll': 'Payroll Processing',
     'pay-increases': 'Pay Increase Requests',
     'documents': 'Document Center',
@@ -567,6 +592,7 @@ function navigate(page) {
     'timeoff': renderTimeOff,
     'timeoff-calendar': renderTimeOffCalendar,
     'timeoff-yearly': renderTimeOffYearly,
+    'director-payroll': renderDirectorPayroll,
     'payroll': renderPayroll,
     'pay-increases': renderPayIncreases,
     'documents': renderDocuments,
@@ -852,37 +878,41 @@ function showEditEmployee(empId) {
   const emp = employees.find(e => e.id === empId);
   if (!emp) return;
   const showRate = canSeePayRate();
+  const isDir = currentUser.role === 'director';
+  const isAdmin = ['owner','payroll','hr'].includes(currentUser.role);
+  const ro = isDir ? 'disabled style="background:var(--gray-100);color:var(--gray-400)"' : '';
   
   let html = `<div class="modal-header"><h3>Edit Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
+      ${isDir ? '<div style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Directors can edit classroom, position, and schedule. Other fields are managed by admin.</div>' : ''}
       <div class="form-row">
-        <div class="form-group"><label>First Name</label><input id="editFirst" value="${emp.first_name}"></div>
-        <div class="form-group"><label>Last Name</label><input id="editLast" value="${emp.last_name}"></div>
+        <div class="form-group"><label>First Name</label><input id="editFirst" value="${emp.first_name}" ${ro}></div>
+        <div class="form-group"><label>Last Name</label><input id="editLast" value="${emp.last_name}" ${ro}></div>
       </div>
       <div class="form-row-3">
-        <div class="form-group"><label>Center</label><select id="editCenter">
+        <div class="form-group"><label>Center</label><select id="editCenter" ${ro}>
           ${CENTERS.map(c=>`<option value="${c}"${c===emp.center?' selected':''}>${c}</option>`).join('')}
         </select></div>
         <div class="form-group"><label>Classroom</label><input id="editClassroom" value="${emp.classroom||''}" placeholder="e.g. Twos - Bears"></div>
         <div class="form-group"><label>Position / Role</label><input id="editPosition" value="${emp.position||''}" placeholder="e.g. Lead, Assistant"></div>
       </div>
       <div class="form-row-3">
-        <div class="form-group"><label>Year Hired</label><input id="editYearHired" type="number" value="${emp.year_hired}"></div>
-        <div class="form-group"><label>Start Date</label><input id="editStartDate" type="date" value="${emp.start_date ? emp.start_date.split('T')[0] : ''}"></div>
+        <div class="form-group"><label>Year Hired</label><input id="editYearHired" type="number" value="${emp.year_hired}" ${ro}></div>
+        <div class="form-group"><label>Start Date</label><input id="editStartDate" type="date" value="${emp.start_date ? emp.start_date.split('T')[0] : ''}" ${ro}></div>
         <div class="form-group"><label>Schedule (M-F)</label><input id="editSchedule" value="${emp.scheduled_times||''}"></div>
       </div>
       <div class="form-row-3">
-        <div class="form-group"><label>Weekly Hours</label><input id="editWeeklyHrs" type="number" value="${emp.weekly_hours||40}"></div>
-        <div class="form-group"><label>Full-Time?</label><select id="editFT">
+        <div class="form-group"><label>Weekly Hours</label><input id="editWeeklyHrs" type="number" value="${emp.weekly_hours||40}" ${ro}></div>
+        <div class="form-group"><label>Full-Time?</label><select id="editFT" ${ro}>
           <option value="true"${emp.is_full_time?' selected':''}>Full-Time (35+ hrs)</option>
           <option value="false"${!emp.is_full_time?' selected':''}>Part-Time</option>
         </select></div>
         ${showRate ? `<div class="form-group"><label>Hourly Rate</label><input id="editRate" type="number" step="0.01" value="${emp.hourly_rate||''}"></div>` : '<div></div>'}
       </div>
-      <div class="form-group"><label><input type="checkbox" id="editAdmin"${emp.is_admin?' checked':''}> Administrator / Senior Staff</label></div>
+      ${isAdmin ? `<div class="form-group"><label><input type="checkbox" id="editAdmin"${emp.is_admin?' checked':''}> Administrator / Senior Staff</label></div>` : ''}
     </div>
     <div class="modal-footer" style="justify-content:space-between">
-      <button class="btn btn-danger btn-sm" onclick="showTerminate(${empId})" style="margin-right:auto">🚫 Terminate Employee</button>
+      ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="showTerminate(${empId})" style="margin-right:auto">🚫 Terminate Employee</button>` : '<div></div>'}
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="saveEditEmployee(${empId})">Save Changes</button>
     </div>`;
@@ -1355,7 +1385,7 @@ async function renderTimeOff() {
   });
   html += `</tr></thead><tbody>`;
   
-  const centerFiltered = isDirector ? filtered : filtered.filter(e => e.center === center);
+  const centerFiltered = isDirector ? filtered.filter(e => !isAdminStaff(e)) : filtered.filter(e => e.center === center);
   
   centerFiltered.forEach(emp => {
     html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
@@ -1578,6 +1608,8 @@ function changeMonth(dir) {
 // ========================
 // YEARLY VIEW TIME OFF
 // ========================
+let yearlySortBy = 'name'; // default sort
+
 async function renderTimeOffYearly() {
   const el = document.getElementById('pageContent');
   const yr = currentYear;
@@ -1608,62 +1640,219 @@ async function renderTimeOffYearly() {
     } catch(e) {}
   }
   
-  const filtered = employees.filter(e => {
-    if (isDirector) return e.center === currentUser.center;
+  let filtered = employees.filter(e => {
+    if (isDirector) return e.center === currentUser.center && !isAdminStaff(e);
     if (selectedCenter !== 'all') return e.center === selectedCenter;
     return true;
   });
   
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   
+  // Compute totals for sorting
+  const withTotals = filtered.map(emp => {
+    const data = allEntries[emp.id] || { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
+    return { ...emp, _totalP: data.paid.reduce((a,b)=>a+b,0), _totalU: data.unpaid.reduce((a,b)=>a+b,0), _data: data };
+  });
+  
+  // Sort
+  const sortFn = yearlySortBy === 'totalP' ? (a,b) => b._totalP - a._totalP
+    : yearlySortBy === 'totalU' ? (a,b) => b._totalU - a._totalU
+    : (a,b) => a.last_name.localeCompare(b.last_name);
+  
+  const sorted = [...withTotals].sort((a,b) => {
+    if (selectedCenter === 'all' && a.center !== b.center) return a.center.localeCompare(b.center);
+    return sortFn(a,b);
+  });
+  
+  const sortBtn = (col, label) => `<th style="text-align:center;font-weight:700;cursor:pointer;user-select:none${yearlySortBy===col?';color:var(--gold);text-decoration:underline':''}" onclick="yearlySortBy='${col}';renderTimeOffYearly()">${label} ↕</th>`;
+  
   html += `<div class="card"><div class="card-header"><h3>Yearly Time Off Summary — ${yr}</h3></div>
     <div class="card-body"><div class="table-scroll">
     <table class="data-table" style="font-size:11px">
       <thead><tr>
-        <th style="min-width:150px">Name</th><th>Center</th>`;
+        <th style="min-width:150px;cursor:pointer${yearlySortBy==='name'?';color:var(--gold);text-decoration:underline':''}" onclick="yearlySortBy='name';renderTimeOffYearly()">Name ↕</th><th>Center</th>`;
   months.forEach(m => { html += `<th style="text-align:center;min-width:55px">${m}</th>`; });
-  html += `<th style="text-align:center;font-weight:700">Total P</th><th style="text-align:center;font-weight:700">Total U</th></tr></thead><tbody>`;
+  html += sortBtn('totalP','Total P') + sortBtn('totalU','Total U') + `</tr></thead><tbody>`;
   
-  // Group by center if showing all
   let currentCtr = '';
-  const sorted = [...filtered].sort((a,b) => {
-    if (selectedCenter === 'all' && a.center !== b.center) return a.center.localeCompare(b.center);
-    return a.last_name.localeCompare(b.last_name);
-  });
-  
   sorted.forEach(emp => {
     if (selectedCenter === 'all' && emp.center !== currentCtr) {
       currentCtr = emp.center;
-      html += `<tr style="background:var(--navy);color:white"><td colspan="${15}" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+      html += `<tr style="background:var(--navy);color:white"><td colspan="16" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
     }
-    
-    const data = allEntries[emp.id] || { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
-    let totalP = 0, totalU = 0;
     
     html += `<tr class="clickable" onclick="showEmployeeDetail(${emp.id})">
       <td><strong>${emp.last_name}, ${emp.first_name}</strong></td>
       <td style="font-size:10px">${emp.center}</td>`;
     
     for (let m = 0; m < 12; m++) {
-      const p = data.paid[m];
-      const u = data.unpaid[m];
-      totalP += p;
-      totalU += u;
-      let cellContent = '';
-      if (p > 0 && u > 0) cellContent = `<span style="color:var(--info);font-weight:600">${p}P</span> <span style="color:var(--danger);font-weight:600">${u}U</span>`;
-      else if (p > 0) cellContent = `<span style="color:var(--info);font-weight:600">${p}P</span>`;
-      else if (u > 0) cellContent = `<span style="color:var(--danger);font-weight:600">${u}U</span>`;
-      else cellContent = '<span style="color:var(--gray-200)">—</span>';
-      html += `<td style="text-align:center">${cellContent}</td>`;
+      const p = emp._data.paid[m], u = emp._data.unpaid[m];
+      let cell = '';
+      if (p > 0 && u > 0) cell = `<span style="color:var(--info);font-weight:600">${p}P</span> <span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else if (p > 0) cell = `<span style="color:var(--info);font-weight:600">${p}P</span>`;
+      else if (u > 0) cell = `<span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else cell = '<span style="color:var(--gray-200)">—</span>';
+      html += `<td style="text-align:center">${cell}</td>`;
     }
     
-    html += `<td style="text-align:center;font-weight:700;color:var(--info)">${totalP || '—'}</td>`;
-    html += `<td style="text-align:center;font-weight:700;color:${totalU > 5 ? 'var(--danger)' : 'var(--gray-600)'}">${totalU || '—'}${totalU > 5 ? ' ⚠️' : ''}</td>`;
+    html += `<td style="text-align:center;font-weight:700;color:var(--info)">${emp._totalP || '—'}</td>`;
+    html += `<td style="text-align:center;font-weight:700;color:${emp._totalU > 5 ? 'var(--danger)' : 'var(--gray-600)'}">${emp._totalU || '—'}${emp._totalU > 5 ? ' ⚠️' : ''}</td>`;
     html += `</tr>`;
   });
   
   html += `</tbody></table></div></div></div>`;
   el.innerHTML = html;
+}
+
+// Helper: check if employee is admin staff (hidden from director time-off screens)
+function isAdminStaff(emp) {
+  const key = (emp.last_name || '').toLowerCase();
+  return ['wardlaw'].includes(key) && ['mary','jay','jared','kelsey'].some(n => (emp.first_name||'').toLowerCase().startsWith(n));
+}
+
+// ========================
+// DIRECTOR PAYROLL PROCESSING (combined upload + time off)
+// ========================
+async function renderDirectorPayroll() {
+  const el = document.getElementById('pageContent');
+  const center = currentUser.center;
+  const filtered = employees.filter(e => e.center === center && !isAdminStaff(e));
+  
+  // Pay period dates
+  const start = new Date(payPeriod.start + 'T12:00:00');
+  const end = new Date(payPeriod.end + 'T12:00:00');
+  const dates = [];
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) dates.push(new Date(d));
+  
+  // Load workflow status
+  let ppStatus = {};
+  try {
+    const allStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`);
+    ppStatus = (allStatus.periods || {})[center] || {};
+  } catch(e) {}
+  
+  const isSubmitted = !!ppStatus.timeoff_submitted;
+  const tcUploaded = !!ppStatus.timecards_uploaded;
+  const isLockedByJared = !!ppStatus.payroll_accessed_at;
+  const changePending = !!ppStatus.change_request_pending;
+  
+  let html = `<div style="margin-bottom:16px;font-size:13px;color:var(--gray-600)">
+    <strong>Pay Period:</strong> ${payPeriod.label} · <strong>Next report due:</strong> ${getNextReportDue()}
+  </div>`;
+  
+  // Status overview
+  html += `<div class="stats-row" style="margin-bottom:20px">
+    <div class="stat-card ${tcUploaded ? 'green' : 'red'}">
+      <div class="stat-label">Step 1: Timecards</div>
+      <div class="stat-value" style="font-size:16px">${tcUploaded ? '✅ Uploaded' : '⏳ Pending'}</div>
+    </div>
+    <div class="stat-card ${isSubmitted ? 'green' : 'red'}">
+      <div class="stat-label">Step 2: Time Off</div>
+      <div class="stat-value" style="font-size:16px">${isSubmitted ? '✅ Submitted' : '⏳ Pending'}</div>
+    </div>
+  </div>`;
+  
+  // ---- SECTION 1: Upload Timecards ----
+  html += `<div class="card" style="margin-bottom:20px"><div class="card-header"><h3>Step 1: Upload Daily Staff Attendance</h3></div>
+    <div class="card-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${payPeriod.label}</strong>.</p>
+      ${tcUploaded ? '<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:10px 14px;margin-bottom:12px;color:var(--success);font-weight:600">✅ Timecards uploaded for this period</div>' : ''}
+      <input type="file" id="dirTimecardFile" accept=".csv" style="margin-bottom:12px">
+      <button class="btn btn-primary" onclick="dirUploadTimecard()">Upload CSV</button>
+      <div id="dirTimecardResult" style="margin-top:12px"></div>
+    </div></div>`;
+  
+  // ---- SECTION 2: Enter Time Off ----
+  // Load time off entries
+  const entries = {};
+  try {
+    const months = new Set();
+    dates.forEach(d => months.add(`${d.getMonth()+1}-${d.getFullYear()}`));
+    for (const my of months) {
+      const [m, y] = my.split('-');
+      const data = await api(`/api/time-off?month=${m}&year=${y}`);
+      data.forEach(e => { entries[`${e.employee_id}-${e.entry_date.split('T')[0]}`] = e; });
+    }
+  } catch(e) {}
+  
+  const isEditable = !isSubmitted;
+  
+  // Status banner
+  if (isSubmitted && !changePending) {
+    html += `<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div><span style="font-weight:700;color:var(--success)">✅ Time Off Report Submitted</span>
+        <span style="font-size:12px;color:var(--gray-600);margin-left:12px">by ${ppStatus.timeoff_submitted_by||'Director'}</span></div>
+      <div>
+        ${!isLockedByJared ? '<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>' : ''}
+        ${isLockedByJared ? '<button class="btn btn-outline btn-sm" onclick="requestTimeOffChange()" style="color:var(--warning)">Request Change</button>' : ''}
+      </div>
+    </div>`;
+  }
+  if (changePending) {
+    html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <span style="font-weight:700;color:var(--warning)">⏳ Change Request Pending</span>
+      <span style="font-size:12px;color:var(--gray-600);margin-left:12px">${ppStatus.change_request_reason||''}</span>
+    </div>`;
+  }
+  
+  html += `<div class="card"><div class="card-header"><h3>Step 2: Enter Time Off — ${payPeriod.label}</h3>
+    <div style="font-size:12px;color:var(--gray-400)">${isEditable ? 'Click a cell: Empty → P → U → Clear' : 'Read-only — submitted'}</div>
+  </div><div class="card-body"><div class="table-scroll">
+    <table class="calendar-grid"><thead><tr><th class="name-col">Employee</th>`;
+  
+  dates.forEach(d => {
+    const dow = d.getDay(); const isWknd = dow === 0 || dow === 6;
+    html += `<th${isWknd?' style="background:var(--gray-600)"':''}>${d.toLocaleDateString('en-US',{weekday:'narrow'})} ${d.getDate()}</th>`;
+  });
+  html += `</tr></thead><tbody>`;
+  
+  filtered.forEach(emp => {
+    html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
+    dates.forEach(d => {
+      const ds = d.toISOString().split('T')[0]; const dow = d.getDay(); const isWknd = dow === 0 || dow === 6;
+      const entry = entries[`${emp.id}-${ds}`];
+      let btnClass = 'empty', btnText = '·';
+      if (entry) { btnClass = entry.entry_type === 'P' ? 'paid' : 'unpaid'; btnText = entry.entry_type; }
+      if (isEditable) {
+        html += `<td class="${isWknd?'weekend':''}"><button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button></td>`;
+      } else {
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
+    });
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div>`;
+  
+  if (!isSubmitted) {
+    html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-200);text-align:right">
+      <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px">✅ Submit Time Off Report</button>
+      <div style="font-size:11px;color:var(--gray-400);margin-top:6px">Once submitted, Jared can process payroll.</div>
+    </div>`;
+  }
+  
+  html += `</div></div>`;
+  el.innerHTML = html;
+}
+
+async function dirUploadTimecard() {
+  const fileInput = document.getElementById('dirTimecardFile');
+  const resultDiv = document.getElementById('dirTimecardResult');
+  if (!fileInput.files[0]) { alert('Select a CSV file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  formData.append('center', currentUser.center);
+  
+  resultDiv.innerHTML = '<em>Uploading...</em>';
+  try {
+    const res = await fetch('/api/import-timecards', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    resultDiv.innerHTML = `<div style="color:var(--success);font-weight:600">✅ Imported ${data.imported} rows, matched ${data.matched} employees, saved ${data.savedDays} daily records.</div>
+      ${data.unmatchedNames?.length ? '<div style="color:var(--warning);margin-top:6px">Unmatched: ' + data.unmatchedNames.join(', ') + '</div>' : ''}`;
+    renderDirectorPayroll();
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
 }
 
 // ========================
