@@ -1800,24 +1800,25 @@ async function renderDirectorPayroll() {
   const center = currentUser.center;
   const filtered = employees.filter(e => e.center === center && !isAdminStaff(e));
   
-  // Load list of recent pay periods to find oldest incomplete
-  let ppList = [];
-  try { ppList = (await api('/api/pay-periods/list')).periods || []; } catch(e) { ppList = []; }
-  
-  // If no dirPayrollPP set yet, find the oldest incomplete period for this center
+  // On first load, check if the previous pay period is incomplete — if so, start there
   if (!dirPayrollPP) {
-    let foundIncomplete = null;
-    for (const pp of ppList) {
-      try {
-        const st = await api(`/api/payroll-period-status?date=${pp.start}`);
-        const ctrStatus = (st.periods || {})[center] || {};
-        if (!ctrStatus.timecards_uploaded || !ctrStatus.timeoff_submitted) {
-          foundIncomplete = pp;
-          break;
-        }
-      } catch(e) {}
+    // Calculate previous pay period
+    const prevDate = new Date(payPeriod.start + 'T12:00:00');
+    prevDate.setDate(prevDate.getDate() - 1);
+    const prevPP = getPayPeriodClient(prevDate);
+    
+    // Check if previous period is incomplete for this center
+    try {
+      const st = await api(`/api/payroll-period-status?date=${prevPP.start}`);
+      const ctrStatus = (st.periods || {})[center] || {};
+      if (!ctrStatus.timecards_uploaded || !ctrStatus.timeoff_submitted) {
+        dirPayrollPP = prevPP; // Previous period is incomplete, start there
+      } else {
+        dirPayrollPP = payPeriod; // Previous is done, show current
+      }
+    } catch(e) {
+      dirPayrollPP = payPeriod;
     }
-    dirPayrollPP = foundIncomplete || payPeriod;
   }
   
   const pp = dirPayrollPP;
