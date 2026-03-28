@@ -2110,6 +2110,65 @@ async function dirUploadTimecard() {
       </div>`;
     }
     
+    // Show daily hours summary grid
+    const pp = dirPayrollPP || payPeriod;
+    const center = currentUser.center;
+    const centerEmps = employees.filter(e => e.center === center && !isAdminStaff(e));
+    
+    // Build date range for the pay period
+    const startD = new Date(pp.start + 'T12:00:00');
+    const endD = new Date(pp.end + 'T12:00:00');
+    const ppDates = [];
+    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) ppDates.push(new Date(d));
+    
+    // Load daily hours for all employees in this period
+    const hoursData = {};
+    for (const emp of centerEmps) {
+      try {
+        const ot = await api(`/api/overtime/${emp.id}?date=${pp.start}`);
+        if (ot.weeks) {
+          ot.weeks.forEach(w => {
+            w.days.forEach(day => {
+              if (day.inPayPeriod && day.hours > 0) {
+                if (!hoursData[emp.id]) hoursData[emp.id] = {};
+                hoursData[emp.id][day.date] = day.hours;
+              }
+            });
+          });
+        }
+      } catch(e) {}
+    }
+    
+    html += `<div style="margin-top:16px"><div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:8px">Daily Hours Summary — ${pp.label}</div>
+      <div class="table-scroll"><table class="data-table" style="font-size:11px">
+      <thead><tr><th style="min-width:140px">Employee</th>`;
+    
+    ppDates.forEach(d => {
+      const dow = d.getDay();
+      const isWknd = dow === 0 || dow === 6;
+      html += `<th style="text-align:center;min-width:45px${isWknd?';background:var(--gray-100)':''}">${d.toLocaleDateString('en-US',{weekday:'narrow'})} ${d.getMonth()+1}/${d.getDate()}</th>`;
+    });
+    html += `<th style="text-align:center;font-weight:700;min-width:55px">Total</th></tr></thead><tbody>`;
+    
+    centerEmps.sort((a,b) => a.last_name.localeCompare(b.last_name));
+    centerEmps.forEach(emp => {
+      const empHours = hoursData[emp.id] || {};
+      let total = 0;
+      html += `<tr><td><strong>${emp.last_name}, ${emp.first_name.charAt(0)}.</strong></td>`;
+      ppDates.forEach(d => {
+        const ds = d.toISOString().split('T')[0];
+        const dow = d.getDay();
+        const isWknd = dow === 0 || dow === 6;
+        const h = empHours[ds] || 0;
+        total += h;
+        html += `<td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px${isWknd?';background:var(--gray-50)':''}${h>8?';color:var(--danger);font-weight:700':''}">${h > 0 ? h.toFixed(1) : '<span style="color:var(--gray-200)">—</span>'}</td>`;
+      });
+      html += `<td style="text-align:center;font-weight:700;font-family:'JetBrains Mono',monospace;font-size:11px${total>80?';color:var(--danger)':''}">${total > 0 ? total.toFixed(1) : '—'}</td>`;
+      html += `</tr>`;
+    });
+    
+    html += `</tbody></table></div></div>`;
+    
     // Signature verification to complete Step 1
     html += `<div style="margin-top:16px;padding:16px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
       <div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:8px">Verify & Sign Attendance Upload</div>
