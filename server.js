@@ -1178,12 +1178,12 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
 app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
   try {
     const payPeriod = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const weeks = getMonToSunWeeks(payPeriod.start, payPeriod.end);
+    const weeks = getSunSatWeeks(payPeriod.start, payPeriod.end);
     
-    // Get daily hours for all overlapping weeks
+    // Get daily hours for all overlapping weeks (full Sun-Sat including outside pay period)
     const allDates = [];
     weeks.forEach(w => {
-      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
         allDates.push(d.toISOString().split('T')[0]);
       }
     });
@@ -1201,7 +1201,7 @@ app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
     const weekDetails = weeks.map(w => {
       let totalHours = 0;
       const days = [];
-      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
         const ds = d.toISOString().split('T')[0];
         const h = hoursMap[ds] || 0;
         totalHours += h;
