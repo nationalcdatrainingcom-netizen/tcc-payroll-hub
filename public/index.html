@@ -1423,9 +1423,16 @@ async function renderTimeOff() {
   
   // Submit button for directors
   if (isDirector && !isSubmitted) {
-    html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-200);text-align:right">
-      <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px">✅ Submit Time Off Report</button>
-      <div style="font-size:11px;color:var(--gray-400);margin-top:6px">Once submitted, Jared can begin processing payroll. You can unsubmit if payroll processing hasn't started yet.</div>
+    html += `<div style="margin-top:20px;padding:20px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:12px">Submit Time Off Report</div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">By typing your full name below, you verify that all paid and unpaid time off entries for this pay period are accurate and complete.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimeOffSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px;white-space:nowrap">✅ Submit & Sign</button>
+      </div>
     </div>`;
   }
   
@@ -1436,10 +1443,25 @@ async function renderTimeOff() {
 async function submitTimeOff() {
   const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
   const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
-  if (!confirm('Submit the time off report for ' + center + ' for the period ' + pp.label + '?\n\nThis tells Jared the data is ready for payroll processing.')) return;
+  
+  const signInput = document.getElementById('dirTimeOffSign');
+  const signName = signInput ? signInput.value.trim() : '';
+  
+  if (!signName) {
+    alert('Please type your full name to verify and sign the time off report.');
+    if (signInput) signInput.focus();
+    return;
+  }
+  
+  if (!confirm('Submit the time off report for ' + center + ' for ' + pp.label + '?\n\nSigned by: ' + signName + '\n\nThis certifies that all time off entries are accurate and complete.')) return;
+  
   try {
     await api('/api/payroll-workflow/submit-timeoff', { method: 'POST', body: {
-      period_start: pp.start, period_end: pp.end, center
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
+    }});
+    // Also record the signature
+    await api('/api/payroll-workflow/sign-timeoff', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
     }});
     if (currentUser.role === 'director') renderDirectorPayroll();
     else renderTimeOff();
@@ -1910,7 +1932,7 @@ async function renderDirectorPayroll() {
         <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${pp.label}</strong>.</p>
         ${tcUploaded ? '<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#27500A;font-weight:600">✅ Timecards uploaded for this period</div>' : ''}
         <input type="file" id="dirTimecardFile" accept=".csv" style="margin-bottom:12px">
-        <button class="btn btn-primary" onclick="dirUploadTimecard()">Upload CSV</button>
+        <button class="btn btn-primary" onclick="dirUploadTimecard()">Upload & Process</button>
         <div id="dirTimecardResult" style="margin-top:12px"></div>
       </div></div>`;
   }
@@ -1982,9 +2004,17 @@ async function renderDirectorPayroll() {
   html += `</tbody></table></div>`;
   
   if (canEdit && !isReadOnly) {
-    html += `<div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--gray-200);text-align:right">
-      <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px">✅ Submit Time Off Report</button>
-      <div style="font-size:11px;color:var(--gray-400);margin-top:6px">Once submitted, Jared can process payroll.</div>
+    html += `<div style="margin-top:20px;padding:20px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:12px">Submit Time Off Report</div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">By typing your full name below, you verify that all paid and unpaid time off entries for this pay period (<strong>${pp.label}</strong>) are accurate and complete.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimeOffSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px;white-space:nowrap">✅ Submit & Sign</button>
+      </div>
+      <div style="font-size:11px;color:var(--gray-400);margin-top:8px">Once submitted, Jared can begin processing payroll. You can unsubmit if payroll processing hasn't started yet.</div>
     </div>`;
   }
   
@@ -2064,7 +2094,7 @@ async function dirUploadTimecard() {
   
   resultDiv.innerHTML = '<em>Uploading...</em>';
   try {
-    const res = await fetch('/api/import-timecards', { method: 'POST', body: formData });
+    const res = await fetch('/api/import-timecard', { method: 'POST', body: formData });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     resultDiv.innerHTML = `<div style="color:var(--success);font-weight:600">✅ Imported ${data.imported} rows, matched ${data.matched} employees, saved ${data.savedDays} daily records.</div>
