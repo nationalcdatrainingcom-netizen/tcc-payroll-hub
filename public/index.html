@@ -2572,7 +2572,7 @@ async function loadPayrollReport() {
     for (const [ctr, emps] of Object.entries(byCenter)) {
       html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">${ctr}</h4>`;
       html += `<div class="table-scroll"><table class="data-table"><thead><tr>
-        <th>Name</th><th>Position</th><th>Rate</th><th>Reg Hrs</th><th>OT Hrs</th><th>Total Hrs</th><th>PTO Days</th><th>Unpaid</th><th>Pay Increases</th>
+        <th>Name</th><th>Reg Hrs</th><th>OT Hrs</th><th>Total Hrs</th><th>PTO Days</th><th>Pay Increases</th>
       </tr></thead><tbody>`;
       
       emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
@@ -2585,23 +2585,20 @@ async function loadPayrollReport() {
         
         html += `<tr>
           <td><strong>${e.last_name}, ${e.first_name}</strong></td>
-          <td style="font-size:11px">${e.position||''}</td>
-          <td style="font-family:'JetBrains Mono',monospace;font-size:12px">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>
           <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
           <td style="font-family:'JetBrains Mono',monospace;${hasOT?'color:var(--danger);font-weight:700':''}">${hasOT ? e.overtimeHours.toFixed(2) : '—'}</td>
           <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
           <td>${e.ptoDays > 0 ? '<span class="badge badge-info">'+e.ptoDays+'</span>' : '—'}</td>
-          <td>${e.unpaidDays > 0 ? '<span class="badge badge-danger">'+e.unpaidDays+'</span>' : '—'}</td>
           <td>${hasIncrease ? e.payIncreases.map(pi=>'$'+parseFloat(pi.current_rate).toFixed(2)+'→$'+parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—'}</td>
         </tr>`;
       });
       
       html += `<tr style="background:var(--navy);color:white;font-weight:700">
-        <td colspan="3">TOTAL — ${ctr}</td>
+        <td>TOTAL — ${ctr}</td>
         <td style="font-family:'JetBrains Mono',monospace">${ctrRegular.toFixed(2)}</td>
         <td style="font-family:'JetBrains Mono',monospace">${ctrOT.toFixed(2)}</td>
         <td style="font-family:'JetBrains Mono',monospace">${ctrTotal.toFixed(2)}</td>
-        <td colspan="3"></td>
+        <td colspan="2"></td>
       </tr>`;
       html += `</tbody></table></div>`;
     }
