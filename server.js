@@ -1529,6 +1529,14 @@ app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) =
     const { period_start, period_end, center, signature_name } = req.body;
     const user = req.session.user;
     
+    // Ensure period exists
+    await pool.query(
+      `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
+       VALUES ($1, $2, $2, $3)
+       ON CONFLICT (period_start, period_end, center) DO NOTHING`,
+      [period_start, period_end, center]
+    );
+    
     await pool.query(
       `UPDATE payroll_periods SET timecards_uploaded = TRUE, timecards_signed_by = $1, timecards_signed_at = NOW()
        WHERE period_start = $2 AND period_end = $3 AND center = $4`,
