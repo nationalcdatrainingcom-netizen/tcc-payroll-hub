@@ -1546,8 +1546,9 @@ app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) =
 // Director submits time off report as complete
 app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) => {
   try {
-    const { period_start, period_end, center } = req.body;
+    const { period_start, period_end, center, signature_name } = req.body;
     const user = req.session.user;
+    const signedBy = signature_name || user.full_name;
     
     // Ensure period exists
     await pool.query(
@@ -1560,7 +1561,7 @@ app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) =
     await pool.query(
       `UPDATE payroll_periods SET timeoff_submitted = TRUE, timeoff_submitted_by = $1, timeoff_submitted_at = NOW(), change_request_pending = FALSE
        WHERE period_start = $2 AND period_end = $3 AND center = $4`,
-      [user.full_name, period_start, period_end, center]
+      [signedBy, period_start, period_end, center]
     );
     res.json({ ok: true });
   } catch (err) {
