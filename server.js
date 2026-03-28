@@ -752,13 +752,19 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
     const { employee_id, entry_date, entry_type, notes } = req.body;
     const user = req.session.user;
     
-    // Check if this date is in a past pay period - directors can't edit past periods
+    // Check if this date is in a past pay period that has been submitted - directors can't edit submitted periods
     if (user.role === 'director') {
-      const currentPP = getPayPeriod(new Date());
       const entryD = new Date(entry_date + 'T12:00:00');
-      const ppStart = new Date(currentPP.start + 'T12:00:00');
-      if (entryD < ppStart) {
-        return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods. Submit a change request.' });
+      const entryPP = getPayPeriod(entryD);
+      
+      // Check if this period has been submitted for this director's center
+      const ppCheck = await pool.query(
+        `SELECT timeoff_submitted FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+        [entryPP.start, entryPP.end, user.center]
+      );
+      
+      if (ppCheck.rows.length > 0 && ppCheck.rows[0].timeoff_submitted) {
+        return res.status(403).json({ error: 'past_period', message: 'This pay period has been submitted. Use "Request Change" to modify.' });
       }
     }
     
@@ -777,15 +783,18 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
 
 app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
   try {
-    // Check if director is trying to delete from past period
+    // Check if director is trying to delete from a submitted period
     if (req.session.user.role === 'director') {
       const entry = await pool.query('SELECT entry_date FROM time_off_entries WHERE id = $1', [req.params.id]);
       if (entry.rows.length > 0) {
-        const currentPP = getPayPeriod(new Date());
         const entryD = new Date(entry.rows[0].entry_date);
-        const ppStart = new Date(currentPP.start + 'T12:00:00');
-        if (entryD < ppStart) {
-          return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods.' });
+        const entryPP = getPayPeriod(entryD);
+        const ppCheck = await pool.query(
+          `SELECT timeoff_submitted FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+          [entryPP.start, entryPP.end, req.session.user.center]
+        );
+        if (ppCheck.rows.length > 0 && ppCheck.rows[0].timeoff_submitted) {
+          return res.status(403).json({ error: 'past_period', message: 'This pay period has been submitted.' });
         }
       }
     }
