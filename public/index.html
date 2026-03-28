@@ -2110,17 +2110,43 @@ async function dirUploadTimecard() {
       </div>`;
     }
     
-    if (data.preview && data.preview.length > 0) {
-      html += `<div style="margin-top:12px"><table class="data-table" style="font-size:12px"><thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
-      data.preview.forEach(p => {
-        html += `<tr><td><strong>${p.name}</strong></td><td>${p.date}</td><td>${p.billable}</td><td style="font-family:monospace">${p.hours}</td></tr>`;
-      });
-      html += `</tbody></table></div>`;
-    }
+    // Signature verification to complete Step 1
+    html += `<div style="margin-top:16px;padding:16px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:8px">Verify & Sign Attendance Upload</div>
+      <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">By typing your full name below, you verify that the uploaded daily staff attendance report has been reviewed and is accurate.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimecardSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="signTimecardUpload()" style="padding:10px 20px;white-space:nowrap">✅ Verify & Complete</button>
+      </div>
+    </div>`;
     
     resultDiv.innerHTML = html;
-    // Don't re-render the whole page — just leave the results visible
   } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger);font-weight:600;padding:12px">Error: ${e.message}</div>`; }
+}
+
+async function signTimecardUpload() {
+  const signInput = document.getElementById('dirTimecardSign');
+  const signName = signInput ? signInput.value.trim() : '';
+  
+  if (!signName) {
+    alert('Please type your full name to verify the attendance upload.');
+    if (signInput) signInput.focus();
+    return;
+  }
+  
+  const pp = dirPayrollPP || payPeriod;
+  const center = currentUser.center;
+  
+  try {
+    await api('/api/payroll-workflow/sign-timecards', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
+    }});
+    // Re-render to show the updated green status
+    renderDirectorPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ========================
