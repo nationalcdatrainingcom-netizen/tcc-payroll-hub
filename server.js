@@ -1099,7 +1099,11 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
           OR LOWER(REPLACE(REPLACE(last_name, '-', ''), ' ', '')) = LOWER($2)
           OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' 
           OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
-         AND (LOWER(first_name) = LOWER($3) OR LOWER(first_name) LIKE LOWER($3) || '%' OR LOWER($3) LIKE LOWER(first_name) || '%')
+         AND (LOWER(first_name) = LOWER($3) 
+          OR LOWER(first_name) LIKE LOWER($3) || '%' 
+          OR LOWER($3) LIKE LOWER(first_name) || '%'
+          OR LOWER(first_name) LIKE '%' || LOWER($3) || '%'
+          OR LOWER($3) LIKE '%' || LOWER(first_name) || '%')
          AND is_active = TRUE LIMIT 1`,
         [lastName, lastNorm, firstName]
       );
@@ -1112,7 +1116,7 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
             OR LOWER(REPLACE(REPLACE(last_name, '-', ''), ' ', '')) = LOWER($2)
             OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' 
             OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
-           AND LOWER(first_name) LIKE LOWER($3) || '%'
+           AND (LOWER(first_name) LIKE LOWER($3) || '%' OR LOWER(first_name) LIKE '%' || LOWER($3) || '%')
            AND is_active = TRUE LIMIT 1`,
           [lastName, lastNorm, firstName.substring(0, 3)]
         );
