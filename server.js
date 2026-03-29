@@ -203,6 +203,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS payroll_accessed_at TIMESTAMP`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
+  await pool.query(`ALTER TABLE pay_increase_requests ADD COLUMN IF NOT EXISTS payroll_processed BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -1749,6 +1750,9 @@ app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'),
       );
     }
     
+    // Mark all approved pay increases as processed
+    await pool.query(`UPDATE pay_increase_requests SET payroll_processed = TRUE WHERE status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`);
+    
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1870,10 +1874,10 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
       );
       const unpaidDays = parseInt(unpaid.rows[0].count);
       
-      // Pay increases in this period
+      // Pay increases — show all unprocessed approved increases
       const increases = await pool.query(
-        `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`,
-        [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']
+        `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`,
+        [emp.id]
       );
       
       report.push({
@@ -1989,8 +1993,8 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         );
         
         const increases = await pool.query(
-          `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`,
-          [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']
+          `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`,
+          [emp.id]
         );
         
         if (totalHours > 0 || parseInt(pto.rows[0].count) > 0) {
@@ -2017,25 +2021,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
     const gray = rgb(0.4, 0.4, 0.4);
     const white = rgb(1, 1, 1);
     
-    // Add W-4 pages first
-    for (const doc of w4Docs.rows) {
-      try {
-        if (doc.file_name.toLowerCase().endsWith('.pdf')) {
-          const w4Pdf = await PDFDocument.load(doc.file_data);
-          const pages = await pdfDoc.copyPages(w4Pdf, w4Pdf.getPageIndices());
-          pages.forEach(p => pdfDoc.addPage(p));
-        } else {
-          // Image W-4 — embed as a page
-          const page = pdfDoc.addPage([612, 792]);
-          let img;
-          if (doc.file_name.toLowerCase().match(/\.png$/)) img = await pdfDoc.embedPng(doc.file_data);
-          else img = await pdfDoc.embedJpg(doc.file_data);
-          const scale = Math.min(552 / img.width, 700 / img.height);
-          page.drawImage(img, { x: 30, y: 792 - 46 - img.height * scale, width: img.width * scale, height: img.height * scale });
-          page.drawText(`W-4: ${doc.first_name} ${doc.last_name} (${doc.center})`, { x: 30, y: 762, size: 10, font: fontBold, color: navy });
-        }
-      } catch(e) { /* skip unreadable docs */ }
-    }
+    // W-4s are now included inline with the New Employees section below
     
     // Add payroll report pages
     
