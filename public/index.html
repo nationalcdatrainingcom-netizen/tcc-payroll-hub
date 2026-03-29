@@ -2326,26 +2326,54 @@ async function renderPayroll() {
       </div>
     </div><div class="card-body"><div id="payrollReportArea"><em style="color:var(--gray-400)">Click "Generate Report" to preview on screen, or "Download PDF" for the full report with W-4s.</em></div></div></div>`;
     
+    // Check for pending pay increases
+    let pendingIncreases = [];
+    try {
+      const piResult = await api('/api/pay-increases');
+      pendingIncreases = piResult.filter(p => p.status === 'pending');
+    } catch(e) {}
+    
+    if (pendingIncreases.length > 0) {
+      html += `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px"><div class="card-header"><h3 style="color:var(--danger)">⚠️ Pending Pay Increase Requests (${pendingIncreases.length})</h3></div>
+        <div class="card-body">
+          <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">All pay increase requests must be approved or denied before payroll can be processed.</p>
+          <table class="data-table"><thead><tr><th>Employee</th><th>Center</th><th>Current Rate</th><th>Proposed Rate</th><th>Requested By</th></tr></thead><tbody>`;
+      pendingIncreases.forEach(pi => {
+        html += `<tr><td><strong>${pi.last_name}, ${pi.first_name}</strong></td><td>${pi.center}</td>
+          <td>$${parseFloat(pi.current_rate).toFixed(2)}</td><td>$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+          <td>${pi.requested_by_name||''}</td></tr>`;
+      });
+      html += `</tbody></table>
+        <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="navigate('pay-increases')">Review Pay Increases →</button>
+      </div></div>`;
+    }
+    
     // Close out button for Jared
     if (!pp.payroll_closed) {
       const allDone = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.timecards_uploaded && periods[c]?.timeoff_submitted);
+      const hasPendingPI = pendingIncreases.length > 0;
       html += `<div class="card"><div class="card-header"><h3>Step 4: Process Payroll</h3></div><div class="card-body">`;
-      if (allDone) {
+      if (allDone && !hasPendingPI) {
         html += `<div style="padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
           <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">All centers have uploaded attendance and submitted time off. Process payroll and close this period.</p>
           <div class="form-group"><label>Type your full name to sign</label><input id="payrollCloseSign" placeholder="Full name"></div>
           <button class="btn btn-success" onclick="closePayroll()">Close Payroll Period</button>
         </div>`;
       } else {
+        const blockers = [];
         const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.timecards_uploaded || !periods[c]?.timeoff_submitted);
-        const details = waiting.map(c => {
-          const p = periods[c] || {};
-          const missing = [];
-          if (!p.timecards_uploaded) missing.push('attendance');
-          if (!p.timeoff_submitted) missing.push('time off');
-          return `${c} (${missing.join(' & ')})`;
-        });
-        html += `<p style="font-size:13px;color:var(--warning)">⏳ Waiting for: ${details.join(', ')}</p>`;
+        if (waiting.length > 0) {
+          const details = waiting.map(c => {
+            const p = periods[c] || {};
+            const missing = [];
+            if (!p.timecards_uploaded) missing.push('attendance');
+            if (!p.timeoff_submitted) missing.push('time off');
+            return `${c} (${missing.join(' & ')})`;
+          });
+          blockers.push(`⏳ Waiting for: ${details.join(', ')}`);
+        }
+        if (hasPendingPI) blockers.push(`🚫 ${pendingIncreases.length} pending pay increase request(s) must be resolved first`);
+        html += blockers.map(b => `<p style="font-size:13px;color:var(--warning);margin-bottom:8px">${b}</p>`).join('');
       }
       html += `</div></div>`;
     }
@@ -2569,7 +2597,57 @@ async function loadPayrollReport() {
       <strong>Period:</strong> ${data.payPeriod.label} · <strong>Generated:</strong> ${new Date().toLocaleString()}
     </div>`;
     
-    // Group by center
+    // ---- SECTION 1: Approved Pay Increases ----
+    let allIncreases = [];
+    data.report.forEach(e => {
+      if (e.payIncreases && e.payIncreases.length > 0) {
+        e.payIncreases.forEach(pi => allIncreases.push({ ...pi, empName: `${e.last_name}, ${e.first_name}`, center: e.center }));
+      }
+    });
+    
+    if (allIncreases.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">Pay Increases This Period</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Employee</th><th>Center</th><th>Previous Rate</th><th>New Rate</th><th>Effective</th>
+      </tr></thead><tbody>`;
+      allIncreases.forEach(pi => {
+        html += `<tr>
+          <td><strong>${pi.empName}</strong></td><td>${pi.center}</td>
+          <td style="font-family:'JetBrains Mono',monospace">$${parseFloat(pi.current_rate).toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;color:var(--success);font-weight:700">$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+          <td>${pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : ''}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+    }
+    
+    // ---- SECTION 2: New Employees ----
+    const ppStart = new Date(data.payPeriod.start + 'T12:00:00');
+    const ppEnd = new Date(data.payPeriod.end + 'T12:00:00');
+    const newEmps = employees.filter(e => {
+      if (!e.start_date) return false;
+      const sd = new Date(e.start_date);
+      return sd >= ppStart && sd <= ppEnd;
+    });
+    
+    if (newEmps.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">New Employees This Period</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Center</th><th>Position</th><th>Start Date</th><th>Rate</th><th>W-4</th>
+      </tr></thead><tbody>`;
+      newEmps.forEach(e => {
+        html += `<tr>
+          <td><strong>${e.last_name}, ${e.first_name}</strong></td><td>${e.center}</td>
+          <td>${e.position||'—'}</td>
+          <td>${new Date(e.start_date).toLocaleDateString()}</td>
+          <td style="font-family:'JetBrains Mono',monospace">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>
+          <td><span style="color:var(--gray-400);font-size:11px">See PDF report</span></td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+    }
+    
+    // ---- SECTION 3: Hours by Center ----
     const byCenter = {};
     data.report.forEach(r => {
       if (!byCenter[r.center]) byCenter[r.center] = [];
