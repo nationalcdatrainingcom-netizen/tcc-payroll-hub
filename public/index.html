@@ -500,39 +500,55 @@ async function showApp() {
 // ========================
 function buildNav() {
   const role = currentUser.role;
-  let items = [
-    { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['owner','payroll','hr','director'] },
-    { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll','hr','director'] },
-  ];
+  let items = [];
   
   if (role === 'director') {
-    items.push({ section: 'Director Payroll Processing' });
-    items.push({ id: 'director-payroll', icon: '📋', label: 'Process Payroll', roles: ['director'], showDue: true });
-    items.push({ id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['director'] });
-    items.push({ id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['director'] });
+    // Director: Process Payroll first, then time off, then rest
+    items = [
+      { section: 'Director Payroll Processing' },
+      { id: 'director-payroll', icon: '📋', label: 'Process Payroll', roles: ['director'], showDue: true },
+      { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['director'] },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['director'] },
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['director'] },
+      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['director'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['director'] },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['director'] },
+    ];
+  } else if (role === 'hr') {
+    // Amy: Add employee (roster), pay increases, staffing, terminate/archive, roster, time off views, docs
+    items = [
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['hr'] },
+      { id: 'pay-increases', icon: '📈', label: 'Pay Increases', roles: ['hr'] },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['hr'] },
+      { id: 'archive', icon: '📦', label: 'Archive', roles: ['hr'] },
+      { section: 'Time Off' },
+      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['hr'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['hr'] },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['hr'] },
+      { section: 'Other' },
+      { id: 'documents', icon: '📎', label: 'Documents', roles: ['hr'] },
+    ];
   } else {
-    items.push({ id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll','hr'] });
-    items.push({ id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll','hr'] });
-    items.push({ id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll','hr'] });
-  }
-  
-  if (['owner','payroll','hr'].includes(role)) {
-    items.push({ section: 'Payroll' });
-    items.push({ id: 'payroll', icon: '💰', label: 'Payroll Processing', roles: ['owner','payroll'] });
-    items.push({ id: 'pay-increases', icon: '📈', label: 'Pay Increases', roles: ['owner','payroll','hr'] });
-    items.push({ id: 'documents', icon: '📎', label: 'Documents', roles: ['owner','payroll','hr'] });
-  }
-  
-  items.push({ section: 'Compliance' });
-  items.push({ id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['owner','payroll','hr','director'] });
-  
-  if (['owner','payroll','hr'].includes(role)) {
-    items.push({ id: 'archive', icon: '📦', label: 'Archive', roles: ['owner','payroll','hr'] });
-  }
-  
-  if (role === 'owner') {
-    items.push({ section: 'Settings' });
-    items.push({ id: 'signature', icon: '✍️', label: 'Signature', roles: ['owner'] });
+    // Mary & Jared: Payroll processing, pay increases, documents at top, then everything else
+    items = [
+      { section: 'Payroll' },
+      { id: 'payroll', icon: '💰', label: 'Payroll Processing', roles: ['owner','payroll'] },
+      { id: 'pay-increases', icon: '📈', label: 'Pay Increases', roles: ['owner','payroll'] },
+      { id: 'documents', icon: '📎', label: 'Documents', roles: ['owner','payroll'] },
+      { section: 'Staff' },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['owner','payroll'] },
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll'] },
+      { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll'] },
+      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll'] },
+      { section: 'Compliance' },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['owner','payroll'] },
+      { id: 'archive', icon: '📦', label: 'Archive', roles: ['owner','payroll'] },
+    ];
+    if (role === 'owner') {
+      items.push({ section: 'Settings' });
+      items.push({ id: 'signature', icon: '✍️', label: 'Signature', roles: ['owner'] });
+    }
   }
   
   let html = '';
@@ -703,7 +719,10 @@ async function renderDashboard() {
   
   // PTO Summary - load actual accrual data
   html += `<div class="card"><div class="card-header"><h3>PTO Summary — ${isDirector ? currentUser.center : (dashboardCenter === 'all' ? 'All Centers' : dashboardCenter)}</h3>
-    <button class="btn btn-outline btn-sm" onclick="loadPTOSummary()">Refresh</button>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="loadPTOSummary()">Refresh</button>
+      ${['owner','payroll'].includes(currentUser.role) ? '<button class="btn btn-gold btn-sm" onclick="show2025PTOImport()">Import 2025 PTO Carryover</button>' : ''}
+    </div>
   </div><div class="card-body">
     <div id="ptoSummaryArea"><em style="color:var(--gray-400)">Loading PTO data...</em></div>
   </div></div>`;
@@ -750,7 +769,7 @@ async function loadPTOSummary() {
       </div>
       <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>${details.length}</strong> employees</div>
       <table class="data-table"><thead><tr>
-      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>PTO Accrued<br><small>(hrs÷20)</small></th><th>Tenure Days<br><small>(policy chart)</small></th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
+      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>PTO Accrued<br><small>(hrs÷20)</small></th><th>Tenure Days<br><small>(policy chart)</small></th><th>Carryover<br><small>(from 2025)</small></th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
     </tr></thead><tbody>`;
     
     // Group by center if showing all
@@ -763,7 +782,7 @@ async function loadPTOSummary() {
       details.forEach(e => {
         if (e.center !== currentCtr) {
           currentCtr = e.center;
-          html += `<tr style="background:var(--navy);color:white"><td colspan="10" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+          html += `<tr style="background:var(--navy);color:white"><td colspan="11" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
         }
         html += buildPTORow(e);
       });
@@ -794,6 +813,7 @@ function buildPTORow(e) {
   const noHoursData = (p.totalHoursWorked || 0) === 0;
   const warn = (p.remainingHours || 0) <= 0 && !noHoursData;
   const unpaidWarn = p.unpaidWarning;
+  const hasCarryover = (p.carryoverHours || 0) > 0;
   return `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
     <td><strong>${e.last_name}, ${e.first_name}</strong></td>
     <td>${e.center}</td>
@@ -801,11 +821,78 @@ function buildPTORow(e) {
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.totalHoursWorked||0).toFixed(1)}</td>
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.accruedHours||0).toFixed(1)+'h'}</td>
     <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
+    <td style="font-family:'JetBrains Mono',monospace;font-size:11px;${hasCarryover?'color:var(--info);font-weight:600':''}">${hasCarryover ? (p.carryoverHours).toFixed(1)+'h' : '0h'}</td>
     <td style="font-weight:600">${noHoursData ? '<span style="color:var(--gray-300)">pending</span>' : (p.totalAvailableHours||0).toFixed(1)+'h'}</td>
     <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)</td>
     <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.remainingHours||0).toFixed(1)+'h'}</td>
-    <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months} ⚠️</span>` : (p.unpaidLast6Months||0)}</td>
+    <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months}</span>` : (p.unpaidLast6Months||0)}</td>
   </tr>`;
+}
+
+// ========================
+// 2025 PTO CARRYOVER IMPORT
+// ========================
+function show2025PTOImport() {
+  let html = `<div class="modal-header"><h3>Import 2025 PTO Carryover</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload a CSV or spreadsheet with 2025 PTO usage. The system will calculate how many hours each employee can carry into 2026 (capped at 80 hours).</p>
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+        <strong>Expected columns:</strong><br>
+        Name (Last, First) or separate Last Name / First Name columns<br>
+        P Days (or "Paid Days" or "PTO Days") — number of paid days used in 2025<br>
+        U Days (or "Unpaid Days") — optional
+      </div>
+      <p style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>Calculation:</strong> 2025 Accrued (hours worked ÷ 20, cap 80h) + Tenure Days - (P Days × 8h) = Remaining → Carryover (cap 80h)</p>
+      <input type="file" id="pto2025File" accept=".csv,.xlsx,.xls" style="margin-bottom:12px">
+      <div id="pto2025Result"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="import2025PTO()">Import & Calculate Carryover</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function import2025PTO() {
+  const fileInput = document.getElementById('pto2025File');
+  const resultDiv = document.getElementById('pto2025Result');
+  if (!fileInput.files[0]) { alert('Select a file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  
+  resultDiv.innerHTML = '<em style="color:var(--gray-400)">Processing...</em>';
+  try {
+    const res = await fetch('/api/pto/import-2025', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    
+    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:12px;margin-bottom:12px;color:#27500A;font-weight:600">
+      Processed ${data.imported} employees. ${data.notFound > 0 ? `<span style="color:var(--warning)">${data.notFound} not found.</span>` : ''}
+    </div>`;
+    
+    html += `<div style="max-height:300px;overflow-y:auto"><table class="data-table" style="font-size:11px"><thead><tr>
+      <th>Name</th><th>2025 Hrs</th><th>Accrued</th><th>Tenure</th><th>Total</th><th>P Days</th><th>Used</th><th>Remaining</th><th>Carryover</th><th>Status</th>
+    </tr></thead><tbody>`;
+    
+    data.results.forEach(r => {
+      if (r.status === 'not_found') {
+        html += `<tr style="background:var(--warning-bg)"><td colspan="10"><strong>${r.name}</strong> — Not found in roster</td></tr>`;
+      } else {
+        html += `<tr>
+          <td><strong>${r.name}</strong></td>
+          <td>${r.hoursWorked2025}</td><td>${r.accrued2025}h</td><td>${r.tenureHours}h</td>
+          <td>${r.totalAvail}h</td><td>${r.pDaysUsed}</td><td>${r.hoursUsed}h</td>
+          <td>${r.remaining}h</td>
+          <td style="font-weight:700;color:var(--info)">${r.carryover}h</td>
+          <td style="color:var(--success)">Set</td>
+        </tr>`;
+      }
+    });
+    html += `</tbody></table></div>`;
+    resultDiv.innerHTML = html;
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
 }
 
 // ========================
