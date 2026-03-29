@@ -2687,7 +2687,30 @@ async function loadPayrollReport() {
       html += `</tbody></table></div>`;
     }
     
-    // ---- SECTION 3: Hours by Center ----
+    // ---- SECTION 3: Terminations ----
+    if (data.terminations && data.terminations.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--danger);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid #F09595">Terminations — Action Required</h4>`;
+      html += `<p style="font-size:12px;color:var(--gray-600);margin-bottom:8px">Verify these employees have been terminated in QuickBooks. They will appear on this report and the next report, then be removed.</p>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Center</th><th>Last Day</th><th>Reason</th><th>Terminated By</th><th>Status</th>
+      </tr></thead><tbody>`;
+      data.terminations.forEach(t => {
+        const count = t.termination_payroll_count || 0;
+        const statusLabel = count === 0 ? '🔴 New — Remove from QuickBooks' : '🟡 Verify removed from QuickBooks';
+        const statusColor = count === 0 ? 'var(--danger)' : 'var(--warning)';
+        html += `<tr>
+          <td><strong>${t.last_name}, ${t.first_name}</strong></td>
+          <td>${t.center}</td>
+          <td>${t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '—'}</td>
+          <td style="font-size:11px">${t.termination_reason || '—'}</td>
+          <td style="font-size:11px">${t.terminated_by || '—'}</td>
+          <td style="font-size:11px;font-weight:700;color:${statusColor}">${statusLabel}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
+    }
+    
+    // ---- SECTION 4: Hours by Center ----
     const byCenter = {};
     data.report.forEach(r => {
       if (!byCenter[r.center]) byCenter[r.center] = [];
