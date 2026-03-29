@@ -1884,6 +1884,8 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         [emp.id]
       );
       
+      const isNewHire = emp.start_date && new Date(emp.start_date).toISOString().split('T')[0] >= pp.start && new Date(emp.start_date).toISOString().split('T')[0] <= pp.end;
+      
       report.push({
         id: emp.id,
         first_name: emp.first_name,
@@ -1892,13 +1894,15 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         position: emp.position,
         hourly_rate: emp.hourly_rate,
         is_full_time: emp.is_full_time,
+        start_date: emp.start_date,
         totalHours: Math.round(totalHours * 100) / 100,
         regularHours: Math.round(periodRegular * 100) / 100,
         overtimeHours: Math.round(periodOT * 100) / 100,
         ptoDays,
         unpaidDays,
         payIncreases: increases.rows,
-        weekDetails
+        weekDetails,
+        isNewHire
       });
     }
     
@@ -2010,14 +2014,18 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
           [emp.id]
         );
         
-        if (totalHours > 0 || parseInt(pto.rows[0].count) > 0) {
+        // Check if this is a new hire during this pay period
+        const isNewHire = emp.start_date && emp.start_date.toISOString().split('T')[0] >= pp.start && emp.start_date.toISOString().split('T')[0] <= pp.end;
+        
+        if (totalHours > 0 || parseInt(pto.rows[0].count) > 0 || isNewHire || increases.rows.length > 0) {
           centerReport.push({
             name: `${emp.last_name}, ${emp.first_name}`,
             regularHours: Math.round(periodRegular * 100) / 100,
             overtimeHours: Math.round(periodOT * 100) / 100,
             totalHours: Math.round(totalHours * 100) / 100,
             ptoDays: parseInt(pto.rows[0].count),
-            payIncreases: increases.rows
+            payIncreases: increases.rows,
+            isNewHire
           });
         }
       }
