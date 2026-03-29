@@ -204,6 +204,7 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
   await pool.query(`ALTER TABLE pay_increase_requests ADD COLUMN IF NOT EXISTS payroll_processed BOOLEAN DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_payroll_count INTEGER DEFAULT 0`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -1753,6 +1754,9 @@ app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'),
     // Mark all approved pay increases as processed
     await pool.query(`UPDATE pay_increase_requests SET payroll_processed = TRUE WHERE status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`);
     
+    // Increment termination report count for recently terminated employees
+    await pool.query(`UPDATE employees SET termination_payroll_count = COALESCE(termination_payroll_count, 0) + 1 WHERE is_active = FALSE AND terminated_date IS NOT NULL AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)`);
+    
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1898,7 +1902,16 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
       });
     }
     
-    res.json({ payPeriod: pp, report });
+    // Get recently terminated employees that still need to appear on report
+    // termination_payroll_count < 2 means they haven't been on 2 payroll reports yet
+    const terminations = await pool.query(
+      `SELECT id, first_name, last_name, center, position, hourly_rate, terminated_date, termination_reason, terminated_by, termination_payroll_count
+       FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL 
+       AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)
+       ORDER BY terminated_date DESC`
+    );
+    
+    res.json({ payPeriod: pp, report, terminations: terminations.rows });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -2123,6 +2136,42 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
           }
         }
       }
+    }
+    
+    // ---- PAGE: Terminations ----
+    const termEmps = await pool.query(
+      `SELECT first_name, last_name, center, position, terminated_date, termination_reason, terminated_by, termination_payroll_count
+       FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL 
+       AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)
+       ORDER BY terminated_date DESC`
+    );
+    
+    if (termEmps.rows.length > 0) {
+      const termPage = pdfDoc.addPage([612, 792]);
+      let y = 750;
+      termPage.drawText('Terminations — Action Required', { x: 30, y, size: 14, font: fontBold, color: rgb(0.8, 0.1, 0.1) });
+      y -= 18;
+      termPage.drawText(`${pp.label} · Verify removed from QuickBooks`, { x: 30, y, size: 10, font, color: gray });
+      y -= 8;
+      termPage.drawRectangle({ x: 30, y, width: 552, height: 2, color: rgb(0.8, 0.1, 0.1) });
+      y -= 20;
+      
+      const tCols = [30, 180, 270, 350, 450];
+      const tHeaders = ['Employee', 'Center', 'Last Day', 'Reason', 'Status'];
+      termPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
+      tHeaders.forEach((h, i) => termPage.drawText(h, { x: tCols[i] + 2, y, size: 8, font: fontBold, color: white }));
+      y -= 20;
+      
+      termEmps.rows.forEach(t => {
+        const count = t.termination_payroll_count || 0;
+        const status = count === 0 ? 'NEW - Remove from QB' : 'VERIFY removed from QB';
+        termPage.drawText(`${t.last_name}, ${t.first_name}`, { x: tCols[0] + 2, y, size: 8, font, color: black });
+        termPage.drawText(t.center, { x: tCols[1] + 2, y, size: 8, font, color: black });
+        termPage.drawText(t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '—', { x: tCols[2] + 2, y, size: 8, font, color: black });
+        termPage.drawText((t.termination_reason || '—').substring(0, 30), { x: tCols[3] + 2, y, size: 7, font, color: gray });
+        termPage.drawText(status, { x: tCols[4] + 2, y, size: 7, font: fontBold, color: count === 0 ? rgb(0.8, 0.1, 0.1) : rgb(0.7, 0.5, 0) });
+        y -= 14;
+      });
     }
     
     // ---- PAGES: Center Reports ----
