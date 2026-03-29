@@ -2730,10 +2730,20 @@ async function loadPayrollReport() {
         const hasOT = e.overtimeHours > 0;
         const hasIncrease = e.payIncreases && e.payIncreases.length > 0;
         const hasPTO = e.ptoDays > 0;
+        const isNew = e.isNewHire;
         ctrRegular += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
         
-        html += `<tr style="${hasPTO ? 'background:#EBF4FF;' : ''}">
-          <td><strong>${e.last_name}, ${e.first_name}</strong>${hasPTO ? ' <span style="font-size:10px;color:var(--info)">📋 PTO</span>' : ''}</td>
+        let rowBg = '';
+        if (isNew && hasPTO) rowBg = 'background:#EBF4FF;';
+        else if (isNew) rowBg = 'background:#F0FFF0;';
+        else if (hasPTO) rowBg = 'background:#EBF4FF;';
+        
+        let nameTags = '';
+        if (isNew) nameTags += ' <span style="font-size:9px;background:var(--success);color:white;padding:1px 6px;border-radius:4px;font-weight:700">NEW</span>';
+        if (hasPTO) nameTags += ' <span style="font-size:10px;color:var(--info)">📋 PTO</span>';
+        
+        html += `<tr style="${rowBg}">
+          <td><strong>${e.last_name}, ${e.first_name}</strong>${nameTags}</td>
           <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
           <td style="font-family:'JetBrains Mono',monospace;${hasOT?'color:var(--danger);font-weight:700':''}">${hasOT ? e.overtimeHours.toFixed(2) : '—'}</td>
           <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
