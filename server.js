@@ -325,10 +325,21 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
   const totalAvailableDays = totalAvailableHours / hoursPerDay;
   
-  // PTO used this year -- from QuickBooks payroll imports (actual paid PTO)
-  const qbUsed = parseFloat(carryoverHours === undefined ? 0 : 
-    (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
-  const hoursUsed = qbUsed;
+  // PTO used this year -- combine QuickBooks confirmed PTO + any P entries from the app for this year
+  const qbResult = await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId]);
+  const qbUsed = parseFloat(qbResult.rows[0]?.pto_hours_used_qb || 0);
+  
+  // Also count P days entered through the app for the current year (as a cross-reference)
+  const pDaysResult = await pool.query(
+    `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND EXTRACT(YEAR FROM entry_date) = $2`,
+    [empId, currentYear]
+  );
+  const pDaysFromApp = parseInt(pDaysResult.rows[0].count);
+  const pHoursFromApp = pDaysFromApp * hoursPerDay;
+  
+  // Use whichever is higher -- QB is the source of truth for confirmed PTO,
+  // but app entries may be more current if QB hasn't been uploaded yet
+  const hoursUsed = Math.max(qbUsed, pHoursFromApp);
   const daysUsed = Math.round(hoursUsed / hoursPerDay * 10) / 10;
   
   // Remaining
@@ -371,6 +382,9 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
     // Used
     daysUsed,
     hoursUsed: Math.round(hoursUsed * 100) / 100,
+    qbHoursUsed: Math.round(qbUsed * 100) / 100,
+    appPDays: pDaysFromApp,
+    appPHours: Math.round(pHoursFromApp * 100) / 100,
     
     // Remaining
     remainingHours: Math.round(remainingHours * 100) / 100,
@@ -612,6 +626,101 @@ app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), 
       [parseFloat(carryover_hours) || 0, req.params.id]
     );
     res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Bulk set carryover from 2025 PTO data
+app.post('/api/pto/import-2025', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
+  try {
+    const results = [];
+    const rows = [];
+    const stream = require('stream');
+    const csvParser = require('csv-parser');
+    
+    await new Promise((resolve, reject) => {
+      const s = new stream.Readable();
+      let fileContent = fs.readFileSync(req.file.path, 'utf8');
+      if (fileContent.charCodeAt(0) === 0xFEFF) fileContent = fileContent.substring(1);
+      s.push(fileContent);
+      s.push(null);
+      s.pipe(csvParser()).on('data', r => rows.push(r)).on('end', resolve).on('error', reject);
+    });
+    fs.unlinkSync(req.file.path);
+    
+    for (const row of rows) {
+      // Expected columns: Name (or Last Name, First Name), P Days, U Days
+      // Flexible column matching
+      let lastName = '', firstName = '';
+      const name = row['Name'] || row['name'] || row['Employee'] || row['employee'] || '';
+      if (name.includes(',')) {
+        [lastName, firstName] = name.split(',').map(s => s.trim());
+      } else {
+        lastName = row['Last Name'] || row['last_name'] || row['Last'] || '';
+        firstName = row['First Name'] || row['first_name'] || row['First'] || '';
+      }
+      
+      const pDays = parseFloat(row['P Days'] || row['P'] || row['Paid Days'] || row['PTO Days'] || row['paid_days'] || 0);
+      const uDays = parseFloat(row['U Days'] || row['U'] || row['Unpaid Days'] || row['unpaid_days'] || 0);
+      
+      if (!lastName) continue;
+      
+      // Find employee
+      const emp = await pool.query(
+        `SELECT id, first_name, last_name, year_hired, is_full_time, is_admin, weekly_hours 
+         FROM employees WHERE LOWER(last_name) = LOWER($1) AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%')
+         LIMIT 1`,
+        [lastName.trim(), firstName.trim()]
+      );
+      
+      if (emp.rows.length === 0) {
+        results.push({ name: `${lastName}, ${firstName}`, status: 'not_found' });
+        continue;
+      }
+      
+      const e = emp.rows[0];
+      
+      // Calculate 2025 PTO: hours worked in 2025
+      const hrs2025 = await pool.query(
+        `SELECT COALESCE(SUM(hours_worked), 0) as total FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = 2025`,
+        [e.id]
+      );
+      const hoursWorked2025 = parseFloat(hrs2025.rows[0].total);
+      const accrued2025 = Math.min(hoursWorked2025 / 20, 80);
+      
+      // 2025 tenure bonus
+      const tenure = getTenureBonusDays(e.year_hired, e.is_full_time, e.is_admin, parseFloat(e.weekly_hours) || 40);
+      const tenureHours2025 = tenure.additionalHours;
+      
+      // Total available 2025
+      const totalAvail2025 = accrued2025 + tenureHours2025;
+      
+      // Used in 2025 (P days * 8 hours)
+      const hoursUsed2025 = pDays * 8;
+      
+      // Remaining to carry over (capped at 80)
+      const remaining2025 = Math.max(0, totalAvail2025 - hoursUsed2025);
+      const carryover = Math.min(remaining2025, 80);
+      
+      // Set carryover
+      await pool.query('UPDATE employees SET pto_carryover_hours = $1 WHERE id = $2', [carryover, e.id]);
+      
+      results.push({
+        name: `${e.last_name}, ${e.first_name}`,
+        hoursWorked2025: Math.round(hoursWorked2025 * 10) / 10,
+        accrued2025: Math.round(accrued2025 * 10) / 10,
+        tenureHours: Math.round(tenureHours2025 * 10) / 10,
+        totalAvail: Math.round(totalAvail2025 * 10) / 10,
+        pDaysUsed: pDays,
+        hoursUsed: hoursUsed2025,
+        remaining: Math.round(remaining2025 * 10) / 10,
+        carryover: Math.round(carryover * 10) / 10,
+        status: 'ok'
+      });
+    }
+    
+    res.json({ imported: results.filter(r => r.status === 'ok').length, notFound: results.filter(r => r.status === 'not_found').length, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
