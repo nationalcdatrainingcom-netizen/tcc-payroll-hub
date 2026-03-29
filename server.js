@@ -1900,6 +1900,215 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
   }
 });
 
+// Generate downloadable PDF payroll report — all centers, with W-4s
+app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
+    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
+    
+    // Find W-4 documents uploaded since last payroll was closed
+    // Get the previous pay period's close date
+    const prevDate = new Date(pp.start + 'T12:00:00');
+    prevDate.setDate(prevDate.getDate() - 1);
+    const prevPP = getPayPeriod(prevDate);
+    
+    let lastClosedDate = prevPP.start; // default
+    const lastClosed = await pool.query(
+      `SELECT MAX(payroll_closed_at) as closed_at FROM payroll_periods WHERE payroll_closed = TRUE`
+    );
+    if (lastClosed.rows[0]?.closed_at) {
+      lastClosedDate = lastClosed.rows[0].closed_at.toISOString().split('T')[0];
+    }
+    
+    // Get W-4 docs uploaded since last close
+    const w4Docs = await pool.query(
+      `SELECT d.*, e.first_name, e.last_name, e.center FROM documents d
+       JOIN employees e ON d.employee_id = e.id
+       WHERE LOWER(d.doc_type) LIKE '%w-4%' OR LOWER(d.doc_type) LIKE '%w4%'
+       AND d.created_at >= $1
+       ORDER BY d.created_at`,
+      [lastClosedDate]
+    );
+    
+    // Build payroll report data for ALL centers
+    const allReport = {};
+    for (const center of ['Peace Boulevard', 'Niles', 'Montessori']) {
+      const empsResult = await pool.query(
+        `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (
+          SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2
+        )) AND e.center = $3 ORDER BY e.last_name, e.first_name`,
+        [pp.start, pp.end, center]
+      );
+      
+      let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, req.session.user));
+      const centerReport = [];
+      
+      for (const emp of empRows) {
+        const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
+        const allDates = new Set();
+        sunSatWeeks.forEach(w => {
+          for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
+            allDates.add(d.toISOString().split('T')[0]);
+        });
+        
+        const allHours = await pool.query(
+          `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`,
+          [emp.id, [...allDates]]
+        );
+        const hoursMap = {};
+        allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
+        
+        let totalHours = 0, periodRegular = 0, periodOT = 0;
+        for (const w of sunSatWeeks) {
+          let weekTotal = 0, weekInPeriod = 0;
+          const days = [];
+          for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+            const ds = d.toISOString().split('T')[0];
+            const h = hoursMap[ds] || 0;
+            weekTotal += h;
+            const inPeriod = ds >= pp.start && ds <= pp.end;
+            if (inPeriod) weekInPeriod += h;
+            days.push({ date: ds, hours: h, inPeriod });
+          }
+          totalHours += weekInPeriod;
+          if (weekTotal <= 40) { periodRegular += weekInPeriod; }
+          else {
+            let inPeriodAfter40 = 0, runningTotal = 0;
+            for (const day of days) {
+              runningTotal += day.hours;
+              if (day.inPeriod && runningTotal > 40) inPeriodAfter40 += Math.min(day.hours, runningTotal - 40);
+            }
+            periodOT += inPeriodAfter40;
+            periodRegular += (weekInPeriod - inPeriodAfter40);
+          }
+        }
+        
+        const pto = await pool.query(
+          `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
+          [emp.id, pp.start, pp.end]
+        );
+        
+        const increases = await pool.query(
+          `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`,
+          [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']
+        );
+        
+        if (totalHours > 0 || parseInt(pto.rows[0].count) > 0) {
+          centerReport.push({
+            name: `${emp.last_name}, ${emp.first_name}`,
+            regularHours: Math.round(periodRegular * 100) / 100,
+            overtimeHours: Math.round(periodOT * 100) / 100,
+            totalHours: Math.round(totalHours * 100) / 100,
+            ptoDays: parseInt(pto.rows[0].count),
+            payIncreases: increases.rows
+          });
+        }
+      }
+      allReport[center] = centerReport;
+    }
+    
+    // Build PDF
+    const pdfDoc = await PDFDocument.create();
+    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+    const navy = rgb(0.106, 0.165, 0.290);
+    const gold = rgb(0.784, 0.588, 0.243);
+    const black = rgb(0, 0, 0);
+    const gray = rgb(0.4, 0.4, 0.4);
+    const white = rgb(1, 1, 1);
+    
+    // Add W-4 pages first
+    for (const doc of w4Docs.rows) {
+      try {
+        if (doc.file_name.toLowerCase().endsWith('.pdf')) {
+          const w4Pdf = await PDFDocument.load(doc.file_data);
+          const pages = await pdfDoc.copyPages(w4Pdf, w4Pdf.getPageIndices());
+          pages.forEach(p => pdfDoc.addPage(p));
+        } else {
+          // Image W-4 — embed as a page
+          const page = pdfDoc.addPage([612, 792]);
+          let img;
+          if (doc.file_name.toLowerCase().match(/\.png$/)) img = await pdfDoc.embedPng(doc.file_data);
+          else img = await pdfDoc.embedJpg(doc.file_data);
+          const scale = Math.min(552 / img.width, 700 / img.height);
+          page.drawImage(img, { x: 30, y: 792 - 46 - img.height * scale, width: img.width * scale, height: img.height * scale });
+          page.drawText(`W-4: ${doc.first_name} ${doc.last_name} (${doc.center})`, { x: 30, y: 762, size: 10, font: fontBold, color: navy });
+        }
+      } catch(e) { /* skip unreadable docs */ }
+    }
+    
+    // Add payroll report pages
+    function addReportPage(centerName, employees) {
+      const page = pdfDoc.addPage([612, 792]);
+      let y = 750;
+      
+      // Header
+      page.drawText('The Children\'s Center — Payroll Report', { x: 30, y: y, size: 14, font: fontBold, color: navy });
+      y -= 18;
+      page.drawText(`${centerName} · ${pp.label} · Pay Date: ${pp.payDate}`, { x: 30, y: y, size: 10, font, color: gray });
+      y -= 8;
+      page.drawRectangle({ x: 30, y: y, width: 552, height: 2, color: gold });
+      y -= 20;
+      
+      // Table header
+      const cols = [30, 200, 280, 350, 420, 480];
+      const headers = ['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Days', 'Pay Increases'];
+      page.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
+      headers.forEach((h, i) => {
+        page.drawText(h, { x: cols[i] + 2, y: y, size: 8, font: fontBold, color: white });
+      });
+      y -= 20;
+      
+      let totalReg = 0, totalOT = 0, totalHrs = 0;
+      
+      employees.forEach(emp => {
+        if (y < 60) {
+          // New page
+          const np = pdfDoc.addPage([612, 792]);
+          y = 750;
+          np.drawText(`${centerName} (continued)`, { x: 30, y: y, size: 10, font: fontBold, color: navy });
+          y -= 20;
+        }
+        
+        const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
+        currentPage.drawText(emp.name, { x: cols[0] + 2, y: y, size: 8, font, color: black });
+        currentPage.drawText(emp.regularHours.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font, color: black });
+        currentPage.drawText(emp.overtimeHours > 0 ? emp.overtimeHours.toFixed(2) : '—', { x: cols[2] + 2, y: y, size: 8, font, color: emp.overtimeHours > 0 ? rgb(0.8, 0.1, 0.1) : gray });
+        currentPage.drawText(emp.totalHours.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: black });
+        currentPage.drawText(emp.ptoDays > 0 ? String(emp.ptoDays) : '—', { x: cols[4] + 2, y: y, size: 8, font, color: black });
+        const incText = emp.payIncreases.length > 0 ? emp.payIncreases.map(pi => '$' + parseFloat(pi.current_rate).toFixed(2) + '→$' + parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—';
+        currentPage.drawText(incText, { x: cols[5] + 2, y: y, size: 7, font, color: black });
+        
+        totalReg += emp.regularHours;
+        totalOT += emp.overtimeHours;
+        totalHrs += emp.totalHours;
+        y -= 14;
+      });
+      
+      // Totals row
+      const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
+      y -= 4;
+      currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
+      currentPage.drawText('TOTAL — ' + centerName, { x: cols[0] + 2, y: y, size: 8, font: fontBold, color: white });
+      currentPage.drawText(totalReg.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font: fontBold, color: white });
+      currentPage.drawText(totalOT.toFixed(2), { x: cols[2] + 2, y: y, size: 8, font: fontBold, color: white });
+      currentPage.drawText(totalHrs.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: white });
+    }
+    
+    for (const [center, emps] of Object.entries(allReport)) {
+      if (emps.length > 0) addReportPage(center, emps);
+    }
+    
+    const pdfBytes = await pdfDoc.save();
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="Payroll_Report_${pp.start}_${pp.end}.pdf"`);
+    res.send(Buffer.from(pdfBytes));
+  } catch (err) {
+    console.error('PDF generation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 function getSunSatWeeks(startDate, endDate) {
   const start = new Date(startDate + 'T12:00:00');
   const end = new Date(endDate + 'T12:00:00');
