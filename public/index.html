@@ -2319,9 +2319,12 @@ async function renderPayroll() {
   
   // ---- PAYROLL REPORT (Jared/Mary) ----
   if (isPayroll) {
-    html += `<div class="card"><div class="card-header"><h3>Payroll Report — ${center}</h3>
-      <button class="btn btn-primary btn-sm" onclick="loadPayrollReport()">Generate Report</button>
-    </div><div class="card-body"><div id="payrollReportArea"><em style="color:var(--gray-400)">Click "Generate Report" to load.</em></div></div></div>`;
+    html += `<div class="card"><div class="card-header"><h3>Payroll Report — All Centers</h3>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="loadPayrollReport()">Generate Report</button>
+        <button class="btn btn-gold btn-sm" onclick="downloadPayrollPDF()">📄 Download PDF</button>
+      </div>
+    </div><div class="card-body"><div id="payrollReportArea"><em style="color:var(--gray-400)">Click "Generate Report" to preview on screen, or "Download PDF" for the full report with W-4s.</em></div></div></div>`;
     
     // Close out button for Jared
     if (!pp.payroll_closed) {
@@ -2545,13 +2548,17 @@ async function denyChangeReq(id) {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+function downloadPayrollPDF() {
+  window.open(`/api/payroll-report/pdf?date=${payPeriod.start}`, '_blank');
+}
+
 async function loadPayrollReport() {
   const area = document.getElementById('payrollReportArea');
-  area.innerHTML = '<em style="color:var(--gray-400)">Generating report...</em>';
+  area.innerHTML = '<em style="color:var(--gray-400)">Generating report for all centers...</em>';
   
   try {
-    const center = selectedCenter === 'all' ? '' : selectedCenter;
-    const data = await api(`/api/payroll-report?date=${payPeriod.start}&center=${center}`);
+    // Load all centers
+    const data = await api(`/api/payroll-report?date=${payPeriod.start}&center=`);
     
     if (!data.report || data.report.length === 0) {
       area.innerHTML = '<p style="color:var(--gray-400)">No payroll data for this period. Upload timecards first.</p>';
