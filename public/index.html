@@ -1244,51 +1244,91 @@ function showAddEmployee() {
   let html = `<div class="modal-header"><h3>Add Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row">
-        <div class="form-group"><label>First Name</label><input id="empFirst" placeholder="First name"></div>
-        <div class="form-group"><label>Last Name</label><input id="empLast" placeholder="Last name"></div>
+        <div class="form-group"><label>First Name <span style="color:var(--danger)">*</span></label><input id="empFirst" placeholder="First name" required></div>
+        <div class="form-group"><label>Last Name <span style="color:var(--danger)">*</span></label><input id="empLast" placeholder="Last name" required></div>
       </div>
       <div class="form-row-3">
-        <div class="form-group"><label>Center</label><select id="empCenter">
+        <div class="form-group"><label>Center <span style="color:var(--danger)">*</span></label><select id="empCenter">
           ${CENTERS.map(c=>`<option value="${c}">${c}</option>`).join('')}
         </select></div>
         <div class="form-group"><label>Position</label><input id="empPosition" placeholder="e.g. Lead, Assistant"></div>
         <div class="form-group"><label>Year Hired</label><input id="empYearHired" type="number" value="${new Date().getFullYear()}"></div>
       </div>
       <div class="form-row-3">
-        <div class="form-group"><label>Start Date</label><input id="empStartDate" type="date"></div>
+        <div class="form-group"><label>Start Date <span style="color:var(--danger)">*</span></label><input id="empStartDate" type="date" value="${new Date().toISOString().split('T')[0]}"></div>
         <div class="form-group"><label>Schedule (M-F)</label><input id="empSchedule" placeholder="e.g. 8am-5pm"></div>
         <div class="form-group"><label>Weekly Hours</label><input id="empWeeklyHrs" type="number" value="40"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Full-Time?</label><select id="empFT"><option value="true">Full-Time (35+ hrs)</option><option value="false">Part-Time</option></select></div>
-        ${canSeePayRate() ? `<div class="form-group"><label>Hourly Rate</label><input id="empRate" type="number" step="0.01" placeholder="0.00"></div>` : ''}
+        ${canSeePayRate() ? `<div class="form-group"><label>Hourly Rate <span style="color:var(--danger)">*</span></label><input id="empRate" type="number" step="0.01" placeholder="0.00"></div>` : ''}
       </div>
       <div class="form-group"><label><input type="checkbox" id="empAdmin"> Administrator / Senior Staff</label></div>
+      <div style="margin-top:12px;padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
+        <label style="font-size:13px;font-weight:700;color:var(--navy);display:block;margin-bottom:8px">W-4 Form <span style="color:var(--danger)">* Required</span></label>
+        <p style="font-size:11px;color:var(--gray-600);margin-bottom:8px">Upload a photo or scan of the employee's completed W-4 form. This will be included in the payroll report.</p>
+        <input type="file" id="empW4File" accept="image/*,.pdf" style="font-size:13px">
+        <div id="empW4Preview" style="margin-top:8px"></div>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="saveEmployee()">Save Employee</button>
+      <button class="btn btn-primary" onclick="saveEmployee()">Add Employee</button>
     </div>`;
   
   document.getElementById('modalContent').innerHTML = html;
   document.getElementById('modalOverlay').classList.add('active');
+  
+  // W-4 preview
+  document.getElementById('empW4File').addEventListener('change', function() {
+    const prev = document.getElementById('empW4Preview');
+    if (this.files[0]) {
+      const f = this.files[0];
+      if (f.type.startsWith('image/')) {
+        const url = URL.createObjectURL(f);
+        prev.innerHTML = `<img src="${url}" style="max-width:200px;max-height:150px;border:1px solid var(--gray-200);border-radius:4px">`;
+      } else {
+        prev.innerHTML = `<span style="font-size:12px;color:var(--success)">✅ ${f.name} selected</span>`;
+      }
+    } else { prev.innerHTML = ''; }
+  });
 }
 
 async function saveEmployee() {
+  const firstName = document.getElementById('empFirst').value.trim();
+  const lastName = document.getElementById('empLast').value.trim();
+  const startDate = document.getElementById('empStartDate').value;
+  const w4File = document.getElementById('empW4File').files[0];
+  
+  if (!firstName || !lastName) { alert('First and last name are required.'); return; }
+  if (!startDate) { alert('Start date is required.'); return; }
+  if (!w4File) { alert('W-4 form is required. Please upload a photo or scan of the completed W-4.'); return; }
+  
   try {
-    await api('/api/employees', { method: 'POST', body: {
-      first_name: document.getElementById('empFirst').value,
-      last_name: document.getElementById('empLast').value,
+    // Step 1: Create employee
+    const emp = await api('/api/employees', { method: 'POST', body: {
+      first_name: firstName,
+      last_name: lastName,
       center: document.getElementById('empCenter').value,
       position: document.getElementById('empPosition').value,
       year_hired: parseInt(document.getElementById('empYearHired').value),
-      start_date: document.getElementById('empStartDate').value || null,
+      start_date: startDate,
       scheduled_times: document.getElementById('empSchedule').value,
       weekly_hours: parseFloat(document.getElementById('empWeeklyHrs').value),
       is_full_time: document.getElementById('empFT').value === 'true',
       hourly_rate: document.getElementById('empRate')?.value ? parseFloat(document.getElementById('empRate').value) : null,
       is_admin: document.getElementById('empAdmin').checked
     }});
+    
+    // Step 2: Upload W-4 document
+    const formData = new FormData();
+    formData.append('file', w4File);
+    formData.append('employee_id', emp.id);
+    formData.append('doc_type', 'W-4');
+    formData.append('notes', 'Uploaded with new hire');
+    
+    await fetch('/api/documents', { method: 'POST', body: formData });
+    
     closeModal();
     await loadEmployees();
     renderEmployees();
