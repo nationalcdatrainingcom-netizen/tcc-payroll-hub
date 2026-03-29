@@ -2038,11 +2038,112 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
     }
     
     // Add payroll report pages
+    
+    // Helper to get current page and handle page breaks
+    function getPage() { return pdfDoc.getPages()[pdfDoc.getPageCount() - 1]; }
+    
+    // ---- PAGE: Pay Increases ----
+    const allIncreases = [];
+    for (const [center, emps] of Object.entries(allReport)) {
+      emps.forEach(emp => {
+        if (emp.payIncreases && emp.payIncreases.length > 0) {
+          emp.payIncreases.forEach(pi => allIncreases.push({ ...pi, empName: emp.name, center }));
+        }
+      });
+    }
+    
+    if (allIncreases.length > 0) {
+      const piPage = pdfDoc.addPage([612, 792]);
+      let y = 750;
+      piPage.drawText('Pay Increases This Period', { x: 30, y, size: 14, font: fontBold, color: navy });
+      y -= 18;
+      piPage.drawText(pp.label, { x: 30, y, size: 10, font, color: gray });
+      y -= 8;
+      piPage.drawRectangle({ x: 30, y, width: 552, height: 2, color: gold });
+      y -= 20;
+      
+      const piCols = [30, 200, 300, 380, 470];
+      const piHeaders = ['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'];
+      piPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
+      piHeaders.forEach((h, i) => piPage.drawText(h, { x: piCols[i] + 2, y, size: 8, font: fontBold, color: white }));
+      y -= 20;
+      
+      allIncreases.forEach(pi => {
+        piPage.drawText(pi.empName, { x: piCols[0] + 2, y, size: 8, font, color: black });
+        piPage.drawText(pi.center, { x: piCols[1] + 2, y, size: 8, font, color: black });
+        piPage.drawText('$' + parseFloat(pi.current_rate).toFixed(2), { x: piCols[2] + 2, y, size: 8, font, color: black });
+        piPage.drawText('$' + parseFloat(pi.proposed_rate).toFixed(2), { x: piCols[3] + 2, y, size: 8, font: fontBold, color: rgb(0.1, 0.5, 0.1) });
+        piPage.drawText(pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : '', { x: piCols[4] + 2, y, size: 8, font, color: gray });
+        y -= 14;
+      });
+    }
+    
+    // ---- PAGE: New Employees ----
+    const newEmps = await pool.query(
+      `SELECT e.*, 
+        (SELECT COUNT(*) FROM documents d WHERE d.employee_id = e.id AND (LOWER(d.doc_type) LIKE '%w-4%' OR LOWER(d.doc_type) LIKE '%w4%')) as has_w4
+       FROM employees e WHERE e.start_date >= $1 AND e.start_date <= $2 AND e.is_active = TRUE
+       ORDER BY e.center, e.last_name`,
+      [pp.start, pp.end]
+    );
+    
+    if (newEmps.rows.length > 0) {
+      const nePage = pdfDoc.addPage([612, 792]);
+      let y = 750;
+      nePage.drawText('New Employees This Period', { x: 30, y, size: 14, font: fontBold, color: navy });
+      y -= 18;
+      nePage.drawText(pp.label, { x: 30, y, size: 10, font, color: gray });
+      y -= 8;
+      nePage.drawRectangle({ x: 30, y, width: 552, height: 2, color: gold });
+      y -= 20;
+      
+      const neCols = [30, 200, 300, 400, 480];
+      const neHeaders = ['Employee', 'Center', 'Position', 'Start Date', 'Rate'];
+      nePage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
+      neHeaders.forEach((h, i) => nePage.drawText(h, { x: neCols[i] + 2, y, size: 8, font: fontBold, color: white }));
+      y -= 20;
+      
+      for (const emp of newEmps.rows) {
+        nePage.drawText(`${emp.last_name}, ${emp.first_name}`, { x: neCols[0] + 2, y, size: 8, font, color: black });
+        nePage.drawText(emp.center, { x: neCols[1] + 2, y, size: 8, font, color: black });
+        nePage.drawText(emp.position || '', { x: neCols[2] + 2, y, size: 8, font, color: black });
+        nePage.drawText(emp.start_date ? new Date(emp.start_date).toLocaleDateString() : '', { x: neCols[3] + 2, y, size: 8, font, color: black });
+        nePage.drawText(emp.hourly_rate ? '$' + parseFloat(emp.hourly_rate).toFixed(2) : '—', { x: neCols[4] + 2, y, size: 8, font, color: black });
+        y -= 14;
+        
+        // Add their W-4 if it exists
+        if (parseInt(emp.has_w4) > 0) {
+          const w4 = await pool.query(
+            `SELECT file_name, file_data FROM documents WHERE employee_id = $1 AND (LOWER(doc_type) LIKE '%w-4%' OR LOWER(doc_type) LIKE '%w4%') ORDER BY created_at DESC LIMIT 1`,
+            [emp.id]
+          );
+          if (w4.rows.length > 0) {
+            try {
+              const doc = w4.rows[0];
+              if (doc.file_name.toLowerCase().endsWith('.pdf')) {
+                const w4Pdf = await PDFDocument.load(doc.file_data);
+                const pages = await pdfDoc.copyPages(w4Pdf, w4Pdf.getPageIndices());
+                pages.forEach(p => pdfDoc.addPage(p));
+              } else {
+                const imgPage = pdfDoc.addPage([612, 792]);
+                let img;
+                if (doc.file_name.toLowerCase().match(/\.png$/)) img = await pdfDoc.embedPng(doc.file_data);
+                else img = await pdfDoc.embedJpg(doc.file_data);
+                const scale = Math.min(552 / img.width, 700 / img.height);
+                imgPage.drawImage(img, { x: 30, y: 792 - 46 - img.height * scale, width: img.width * scale, height: img.height * scale });
+                imgPage.drawText(`W-4: ${emp.first_name} ${emp.last_name} (${emp.center})`, { x: 30, y: 762, size: 10, font: fontBold, color: navy });
+              }
+            } catch(e) { /* skip unreadable */ }
+          }
+        }
+      }
+    }
+    
+    // ---- PAGES: Center Reports ----
     function addReportPage(centerName, employees) {
       const page = pdfDoc.addPage([612, 792]);
       let y = 750;
       
-      // Header
       page.drawText('The Children\'s Center — Payroll Report', { x: 30, y: y, size: 14, font: fontBold, color: navy });
       y -= 18;
       page.drawText(`${centerName} · ${pp.label} · Pay Date: ${pp.payDate}`, { x: 30, y: y, size: 10, font, color: gray });
@@ -2050,7 +2151,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       page.drawRectangle({ x: 30, y: y, width: 552, height: 2, color: gold });
       y -= 20;
       
-      // Table header
       const cols = [30, 200, 280, 350, 420, 480];
       const headers = ['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Days', 'Pay Increases'];
       page.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
@@ -2063,7 +2163,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       
       employees.forEach(emp => {
         if (y < 60) {
-          // New page
           const np = pdfDoc.addPage([612, 792]);
           y = 750;
           np.drawText(`${centerName} (continued)`, { x: 30, y: y, size: 10, font: fontBold, color: navy });
@@ -2085,7 +2184,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         y -= 14;
       });
       
-      // Totals row
       const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
       y -= 4;
       currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
