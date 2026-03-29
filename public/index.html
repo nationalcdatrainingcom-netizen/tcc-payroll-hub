@@ -2729,14 +2729,15 @@ async function loadPayrollReport() {
       emps.forEach(e => {
         const hasOT = e.overtimeHours > 0;
         const hasIncrease = e.payIncreases && e.payIncreases.length > 0;
+        const hasPTO = e.ptoDays > 0;
         ctrRegular += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
         
-        html += `<tr>
-          <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+        html += `<tr style="${hasPTO ? 'background:#EBF4FF;' : ''}">
+          <td><strong>${e.last_name}, ${e.first_name}</strong>${hasPTO ? ' <span style="font-size:10px;color:var(--info)">📋 PTO</span>' : ''}</td>
           <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
           <td style="font-family:'JetBrains Mono',monospace;${hasOT?'color:var(--danger);font-weight:700':''}">${hasOT ? e.overtimeHours.toFixed(2) : '—'}</td>
           <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
-          <td>${e.ptoDays > 0 ? '<span class="badge badge-info">'+e.ptoDays+'</span>' : '—'}</td>
+          <td style="${hasPTO ? 'font-weight:700;' : ''}">${hasPTO ? '<span style="display:inline-block;background:var(--info);color:white;font-weight:700;font-size:13px;padding:3px 10px;border-radius:6px">'+e.ptoDays+'</span>' : '—'}</td>
           <td>${hasIncrease ? e.payIncreases.map(pi=>'$'+parseFloat(pi.current_rate).toFixed(2)+'→$'+parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—'}</td>
         </tr>`;
       });
