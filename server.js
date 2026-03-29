@@ -2205,11 +2205,18 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         }
         
         const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
-        currentPage.drawText(emp.name, { x: cols[0] + 2, y: y, size: 8, font, color: black });
+        const hasPTO = emp.ptoDays > 0;
+        
+        // Highlight row if employee has PTO
+        if (hasPTO) {
+          currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 14, color: rgb(0.92, 0.96, 1.0) });
+        }
+        
+        currentPage.drawText(emp.name + (hasPTO ? '  *PTO*' : ''), { x: cols[0] + 2, y: y, size: 8, font: hasPTO ? fontBold : font, color: black });
         currentPage.drawText(emp.regularHours.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font, color: black });
         currentPage.drawText(emp.overtimeHours > 0 ? emp.overtimeHours.toFixed(2) : '--', { x: cols[2] + 2, y: y, size: 8, font, color: emp.overtimeHours > 0 ? rgb(0.8, 0.1, 0.1) : gray });
         currentPage.drawText(emp.totalHours.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: black });
-        currentPage.drawText(emp.ptoDays > 0 ? String(emp.ptoDays) : '--', { x: cols[4] + 2, y: y, size: 8, font, color: black });
+        currentPage.drawText(hasPTO ? String(emp.ptoDays) : '--', { x: cols[4] + 2, y: y, size: 8, font: hasPTO ? fontBold : font, color: hasPTO ? rgb(0.1, 0.3, 0.7) : black });
         const incText = emp.payIncreases.length > 0 ? emp.payIncreases.map(pi => '$' + parseFloat(pi.current_rate).toFixed(2) + '->$' + parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '--';
         currentPage.drawText(incText, { x: cols[5] + 2, y: y, size: 7, font, color: black });
         
