@@ -325,7 +325,7 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
   const totalAvailableDays = totalAvailableHours / hoursPerDay;
   
-  // PTO used this year — from QuickBooks payroll imports (actual paid PTO)
+  // PTO used this year -- from QuickBooks payroll imports (actual paid PTO)
   const qbUsed = parseFloat(carryoverHours === undefined ? 0 : 
     (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
   const hoursUsed = qbUsed;
@@ -522,7 +522,7 @@ function shouldHideFromUser(emp, user) {
   
   if (user.role === 'director') {
     // Directors see everyone at their own center (this is already filtered by the query)
-    // No additional hiding needed — the SQL WHERE center=$1 handles it
+    // No additional hiding needed -- the SQL WHERE center=$1 handles it
     return false;
   }
   
@@ -537,7 +537,7 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     let params = [];
     
     if (user.role === 'director') {
-      // Directors see their center's staff — this includes themselves and any admin at their center
+      // Directors see their center's staff -- this includes themselves and any admin at their center
       query = 'SELECT * FROM employees WHERE is_active = TRUE AND center = $1 ORDER BY last_name, first_name';
       params = [user.center];
     }
@@ -1390,7 +1390,7 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     }
 
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>Staffing Plan — ${centerFull}</title>
+<title>Staffing Plan -- ${centerFull}</title>
 <style>
   @page { size: landscape; margin: 0.3in; }
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -1878,7 +1878,7 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
       );
       const unpaidDays = parseInt(unpaid.rows[0].count);
       
-      // Pay increases — show all unprocessed approved increases
+      // Pay increases -- show all unprocessed approved increases
       const increases = await pool.query(
         `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`,
         [emp.id]
@@ -1917,7 +1917,7 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
   }
 });
 
-// Generate downloadable PDF payroll report — all centers, with W-4s
+// Generate downloadable PDF payroll report -- all centers, with W-4s
 app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
@@ -2107,7 +2107,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         nePage.drawText(emp.center, { x: neCols[1] + 2, y, size: 8, font, color: black });
         nePage.drawText(emp.position || '', { x: neCols[2] + 2, y, size: 8, font, color: black });
         nePage.drawText(emp.start_date ? new Date(emp.start_date).toLocaleDateString() : '', { x: neCols[3] + 2, y, size: 8, font, color: black });
-        nePage.drawText(emp.hourly_rate ? '$' + parseFloat(emp.hourly_rate).toFixed(2) : '—', { x: neCols[4] + 2, y, size: 8, font, color: black });
+        nePage.drawText(emp.hourly_rate ? '$' + parseFloat(emp.hourly_rate).toFixed(2) : '--', { x: neCols[4] + 2, y, size: 8, font, color: black });
         y -= 14;
         
         // Add their W-4 if it exists
@@ -2149,7 +2149,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
     if (termEmps.rows.length > 0) {
       const termPage = pdfDoc.addPage([612, 792]);
       let y = 750;
-      termPage.drawText('Terminations — Action Required', { x: 30, y, size: 14, font: fontBold, color: rgb(0.8, 0.1, 0.1) });
+      termPage.drawText('Terminations -- Action Required', { x: 30, y, size: 14, font: fontBold, color: rgb(0.8, 0.1, 0.1) });
       y -= 18;
       termPage.drawText(`${pp.label} · Verify removed from QuickBooks`, { x: 30, y, size: 10, font, color: gray });
       y -= 8;
@@ -2167,8 +2167,8 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         const status = count === 0 ? 'NEW - Remove from QB' : 'VERIFY removed from QB';
         termPage.drawText(`${t.last_name}, ${t.first_name}`, { x: tCols[0] + 2, y, size: 8, font, color: black });
         termPage.drawText(t.center, { x: tCols[1] + 2, y, size: 8, font, color: black });
-        termPage.drawText(t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '—', { x: tCols[2] + 2, y, size: 8, font, color: black });
-        termPage.drawText((t.termination_reason || '—').substring(0, 30), { x: tCols[3] + 2, y, size: 7, font, color: gray });
+        termPage.drawText(t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '--', { x: tCols[2] + 2, y, size: 8, font, color: black });
+        termPage.drawText((t.termination_reason || '--').substring(0, 30), { x: tCols[3] + 2, y, size: 7, font, color: gray });
         termPage.drawText(status, { x: tCols[4] + 2, y, size: 7, font: fontBold, color: count === 0 ? rgb(0.8, 0.1, 0.1) : rgb(0.7, 0.5, 0) });
         y -= 14;
       });
@@ -2179,7 +2179,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       const page = pdfDoc.addPage([612, 792]);
       let y = 750;
       
-      page.drawText('The Children\'s Center — Payroll Report', { x: 30, y: y, size: 14, font: fontBold, color: navy });
+      page.drawText('The Children\'s Center -- Payroll Report', { x: 30, y: y, size: 14, font: fontBold, color: navy });
       y -= 18;
       page.drawText(`${centerName} · ${pp.label} · Pay Date: ${pp.payDate}`, { x: 30, y: y, size: 10, font, color: gray });
       y -= 8;
@@ -2207,10 +2207,10 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
         currentPage.drawText(emp.name, { x: cols[0] + 2, y: y, size: 8, font, color: black });
         currentPage.drawText(emp.regularHours.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font, color: black });
-        currentPage.drawText(emp.overtimeHours > 0 ? emp.overtimeHours.toFixed(2) : '—', { x: cols[2] + 2, y: y, size: 8, font, color: emp.overtimeHours > 0 ? rgb(0.8, 0.1, 0.1) : gray });
+        currentPage.drawText(emp.overtimeHours > 0 ? emp.overtimeHours.toFixed(2) : '--', { x: cols[2] + 2, y: y, size: 8, font, color: emp.overtimeHours > 0 ? rgb(0.8, 0.1, 0.1) : gray });
         currentPage.drawText(emp.totalHours.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: black });
-        currentPage.drawText(emp.ptoDays > 0 ? String(emp.ptoDays) : '—', { x: cols[4] + 2, y: y, size: 8, font, color: black });
-        const incText = emp.payIncreases.length > 0 ? emp.payIncreases.map(pi => '$' + parseFloat(pi.current_rate).toFixed(2) + '→$' + parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—';
+        currentPage.drawText(emp.ptoDays > 0 ? String(emp.ptoDays) : '--', { x: cols[4] + 2, y: y, size: 8, font, color: black });
+        const incText = emp.payIncreases.length > 0 ? emp.payIncreases.map(pi => '$' + parseFloat(pi.current_rate).toFixed(2) + '->$' + parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '--';
         currentPage.drawText(incText, { x: cols[5] + 2, y: y, size: 7, font, color: black });
         
         totalReg += emp.regularHours;
@@ -2222,7 +2222,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
       y -= 4;
       currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      currentPage.drawText('TOTAL — ' + centerName, { x: cols[0] + 2, y: y, size: 8, font: fontBold, color: white });
+      currentPage.drawText('TOTAL -- ' + centerName, { x: cols[0] + 2, y: y, size: 8, font: fontBold, color: white });
       currentPage.drawText(totalReg.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font: fontBold, color: white });
       currentPage.drawText(totalOT.toFixed(2), { x: cols[2] + 2, y: y, size: 8, font: fontBold, color: white });
       currentPage.drawText(totalHrs.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: white });
