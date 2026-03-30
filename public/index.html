@@ -276,14 +276,42 @@ body { font-family: 'DM Sans', sans-serif; background: var(--gray-50); color: va
 .table-scroll { overflow-x: auto; }
 
 /* ===== RESPONSIVE ===== */
-@media (max-width: 768px) {
-  .sidebar { width: 60px; }
-  .sidebar .nav-item span, .sidebar .nav-section, .sidebar-header h2, .sidebar-header .role-badge, .sidebar-header .center-name { display: none; }
-  .sidebar .nav-item { justify-content: center; padding: 14px 0; }
-  .main-content { margin-left: 60px; }
+/* Hamburger toggle button */
+.sidebar-toggle {
+  display: none; position: fixed; top: 12px; left: 12px; z-index: 150;
+  width: 40px; height: 40px; border-radius: 8px; border: none;
+  background: var(--navy); color: white; font-size: 22px; cursor: pointer;
+  align-items: center; justify-content: center; box-shadow: var(--shadow-md);
+  transition: left 0.3s ease;
+}
+.sidebar-toggle:hover { background: var(--navy-light); }
+
+/* Sidebar collapsed state */
+.sidebar.collapsed { transform: translateX(-250px); }
+.sidebar { transition: transform 0.3s ease; }
+
+/* Overlay when sidebar is open on mobile/tablet */
+.sidebar-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(17,29,53,0.4);
+  z-index: 99; opacity: 0; transition: opacity 0.3s ease;
+}
+.sidebar-overlay.active { display: block; opacity: 1; }
+
+@media (max-width: 1100px) {
+  .sidebar-toggle { display: flex; }
+  .sidebar { transform: translateX(-250px); }
+  .sidebar.open { transform: translateX(0); }
+  .main-content { margin-left: 0 !important; }
+  .top-bar { padding-left: 60px; }
   .page-content { padding: 16px; }
   .stats-row { grid-template-columns: 1fr 1fr; }
   .form-row, .form-row-3 { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 1101px) {
+  .sidebar { transform: translateX(0) !important; }
+  .sidebar-toggle { display: none !important; }
+  .main-content { margin-left: 250px; }
 }
 
 .hidden { display: none !important; }
@@ -317,8 +345,13 @@ body { font-family: 'DM Sans', sans-serif; background: var(--gray-50); color: va
 
 <!-- APP -->
 <div id="app" class="app">
+  <!-- Hamburger toggle -->
+  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()">☰</button>
+  <!-- Overlay for closing sidebar on tap -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+  
   <!-- Sidebar -->
-  <nav class="sidebar">
+  <nav class="sidebar" id="sidebarEl">
     <div class="sidebar-header">
       <h2 id="sidebarName"></h2>
       <span class="role-badge" id="sidebarRole"></span>
@@ -483,6 +516,9 @@ async function showApp() {
   }
   document.getElementById('payPeriodLabel').textContent = payPeriod.label + ' · Pay Date: ' + new Date(payPeriod.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   
+  // Re-render nav now that payPeriod is loaded (so "next report due" date appears)
+  buildNav();
+  
   await loadEmployees();
   
   // Default center selection
@@ -503,14 +539,13 @@ function buildNav() {
   let items = [];
   
   if (role === 'director') {
-    // Director: Process Payroll first, then time off, then rest
+    // Director: Process Payroll first, then time off calendar, then rest
     items = [
       { section: 'Director Payroll Processing' },
       { id: 'director-payroll', icon: '📋', label: 'Process Payroll', roles: ['director'], showDue: true },
-      { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['director'] },
+      { id: 'timeoff-calendar', icon: '📅', label: 'Time Off', roles: ['director'] },
       { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['director'] },
       { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['director'] },
-      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['director'] },
       { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['director'] },
       { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['director'] },
     ];
@@ -570,8 +605,9 @@ function buildNav() {
 }
 
 function getNextReportDue() {
-  if (!payPeriod || !payPeriod.end) return '...';
-  const endDate = new Date(payPeriod.end + 'T12:00:00');
+  const pp = dirPayrollPP || payPeriod;
+  if (!pp || !pp.end) return 'loading...';
+  const endDate = new Date(pp.end + 'T12:00:00');
   let dueDate = new Date(endDate);
   let bizDays = 0;
   while (bizDays < 2) {
@@ -584,13 +620,14 @@ function getNextReportDue() {
 
 function navigate(page) {
   currentPage = page;
+  closeSidebar(); // Close sidebar on mobile/tablet when navigating
   document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
   
   const titles = {
     'dashboard': 'PTO Summary',
     'employees': 'Employee Roster',
     'timeoff': 'Enter Time Off',
-    'timeoff-calendar': 'Monthly View Time Off',
+    'timeoff-calendar': currentUser && currentUser.role === 'director' ? 'Time Off' : 'Monthly View Time Off',
     'timeoff-yearly': 'Yearly View Time Off',
     'director-payroll': 'Director Payroll Processing',
     'payroll': 'Payroll Processing',
@@ -764,7 +801,7 @@ async function loadPTOSummary() {
     let html = `<div style="font-size:11px;color:var(--gray-600);background:var(--gold-pale);padding:10px 14px;border-radius:6px;margin-bottom:12px;line-height:1.6">
         <strong>How PTO is calculated:</strong> Every employee earns <strong>1 hour of PTO for every 20 hours worked</strong> (max 80 hours/year). 
         Full-time staff (35+ hrs/wk) also receive <strong>tenure bonus days</strong> per the policy chart (1-4 extra days for years 1-4, jumps to 11+ at year 5). 
-        Hours worked updates each time a Playground timecard CSV is uploaded.
+        Hours worked updates each time a Playground timecard CSV is uploaded. <strong>PTO balances update once payroll has been closed out each pay period.</strong>
       </div>
       <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>${details.length}</strong> employees</div>
       <table class="data-table"><thead><tr>
@@ -1723,7 +1760,34 @@ async function renderTimeOffCalendar() {
   }
   
   if (isDir) {
-    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">This is a read-only view. To enter time off for the current pay period, use "Process Payroll." To request changes to past periods, click a cell to submit a change request.</div>`;
+    // Load payroll period status for all periods to determine which are closed
+    let closedPeriods = [];
+    try {
+      // Check current and recent periods
+      const periodsResp = await api(`/api/pay-periods/list`);
+      for (const p of periodsResp) {
+        try {
+          const st = await api(`/api/payroll-period-status?date=${p.start}`);
+          const ctrStatus = (st.periods || {})[currentUser.center] || {};
+          if (ctrStatus.payroll_closed || (ctrStatus.timeoff_submitted && ctrStatus.payroll_accessed_at)) {
+            closedPeriods.push({ start: p.start, end: p.end });
+          }
+        } catch(e2) {}
+      }
+    } catch(e) {}
+    
+    function isDateInClosedPeriod(ds) {
+      return closedPeriods.some(p => ds >= p.start && ds <= p.end);
+    }
+    
+    function isDateInCurrentPP(ds) {
+      return currentPP.start && ds >= currentPP.start && ds <= currentPP.end;
+    }
+    
+    html += `<div style="font-size:12px;color:var(--gray-600);margin-bottom:12px;background:var(--gold-pale);padding:10px 14px;border-radius:6px">
+      <strong>Click a cell</strong> in the current pay period (<strong>${currentPP.start ? new Date(currentPP.start+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''} - ${currentPP.end ? new Date(currentPP.end+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</strong>) to toggle: Empty → P → U → Clear. 
+      Past closed periods show as read-only — click a cell to request a change.
+    </div>`;
   } else if (isAdmin) {
     html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">Click a cell to toggle: Empty → P → U → Clear</div>`;
   } else {
@@ -1765,14 +1829,26 @@ async function renderTimeOffCalendar() {
           <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
         </td>`;
       } else if (isDir) {
-        // Directors: read-only but can click to request changes for past periods
-        const isPast = dt < ppStartDate;
-        if (isPast) {
-          html += `<td class="${isWknd?'weekend':''}" style="cursor:pointer" onclick="requestCalendarChange(${emp.id},'${ds}','${emp.first_name} ${emp.last_name}')">
+        // Directors: edit current pay period, request changes for past closed periods
+        const isClosed = isDateInClosedPeriod(ds);
+        const isCurrent = isDateInCurrentPP(ds);
+        const isFuture = !isClosed && !isCurrent;
+        
+        if (isCurrent || isFuture) {
+          // Editable - current or future pay period
+          html += `<td class="${isWknd?'weekend':''}${isCurrent?' style="background:rgba(200,150,62,0.08)"':''}">
+            <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)" title="${emp.first_name} ${emp.last_name} — ${dt.toLocaleDateString()}">${btnText}</button>
+          </td>`;
+        } else if (isClosed) {
+          // Closed period - click to request change
+          html += `<td class="${isWknd?'weekend':''}" style="cursor:pointer;background:var(--gray-50)" onclick="requestCalendarChange(${emp.id},'${ds}','${emp.first_name} ${emp.last_name}')" title="Closed period — click to request change">
             <span style="font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</span>
           </td>`;
         } else {
-          html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+          // Past but not closed - editable
+          html += `<td class="${isWknd?'weekend':''}">
+            <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
+          </td>`;
         }
       } else {
         // HR: read-only
@@ -3499,6 +3575,30 @@ async function saveSig() {
     document.getElementById('sigResult').innerHTML = '<span style="color:var(--success)">✅ Signature saved!</span>';
   } catch(e) { alert('Error: ' + e.message); }
 }
+
+// ========================
+// SIDEBAR TOGGLE
+// ========================
+function toggleSidebar() {
+  const sb = document.getElementById('sidebarEl');
+  const ov = document.getElementById('sidebarOverlay');
+  if (sb.classList.contains('open')) {
+    closeSidebar();
+  } else {
+    sb.classList.add('open');
+    ov.classList.add('active');
+  }
+}
+
+function closeSidebar() {
+  const sb = document.getElementById('sidebarEl');
+  const ov = document.getElementById('sidebarOverlay');
+  sb.classList.remove('open');
+  ov.classList.remove('active');
+}
+
+// Auto-close sidebar when navigating on tablet/mobile
+const _origNavigate = navigate;
 
 // ========================
 // MODAL
