@@ -7,9 +7,11 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HUB_JWT_SECRET = process.env.HUB_JWT_SECRET || '';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -17,6 +19,7 @@ const pool = new Pool({
 });
 
 // Middleware
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
@@ -25,8 +28,61 @@ app.use(session({
   secret: process.env.SESSION_SECRET || 'tcc-payroll-hub-secret-2026',
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000, secure: false }
+  cookie: {
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
+    httpOnly: true
+  }
 }));
+
+// ─── HUB SSO: Auto-login via JWT token from TCC Hub ──────────────────────────
+app.use(async (req, res, next) => {
+  // Skip if already authenticated via normal session cookie
+  if (req.session && req.session.user) return next();
+
+  // Check for hub_token in query string OR Authorization header
+  const token = req.query.hub_token
+    || (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')
+        ? req.headers.authorization.slice(7) : null);
+  if (!token || !HUB_JWT_SECRET) return next();
+
+  try {
+    const decoded = jwt.verify(token, HUB_JWT_SECRET);
+    const hubUsername = decoded.username.toLowerCase();
+
+    // Find matching Payroll Hub user
+    const result = await pool.query('SELECT * FROM users WHERE LOWER(username) = $1', [hubUsername]);
+    let user = result.rows[0];
+
+    // If not found by username, try mapping by role
+    if (!user && decoded.role === 'owner') {
+      const ownerResult = await pool.query("SELECT * FROM users WHERE role = 'owner' LIMIT 1");
+      user = ownerResult.rows[0];
+    }
+
+    // Try matching directors by center
+    if (!user && decoded.center && decoded.center !== 'all') {
+      const centerMap = { 'peace': 'Peace Boulevard', 'niles': 'Niles', 'montessori': 'Montessori' };
+      const mappedCenter = centerMap[decoded.center] || decoded.center;
+      const dirResult = await pool.query("SELECT * FROM users WHERE role = 'director' AND center = $1 LIMIT 1", [mappedCenter]);
+      user = dirResult.rows[0];
+    }
+
+    if (user) {
+      req.session.user = {
+        id: user.id,
+        username: user.username,
+        full_name: user.full_name,
+        role: user.role,
+        center: user.center
+      };
+    }
+  } catch (e) {
+    // Token expired or invalid — fall through to normal auth
+  }
+  next();
+});
 
 // File upload config
 const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
@@ -192,7 +248,6 @@ async function initDB() {
     );
   `);
 
-  // Add carryover column if it doesn't exist (for existing databases)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_carryover_hours NUMERIC(6,2) DEFAULT 0`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_date DATE`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_reason TEXT`);
@@ -203,8 +258,6 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS payroll_accessed_at TIMESTAMP`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
-  await pool.query(`ALTER TABLE pay_increase_requests ADD COLUMN IF NOT EXISTS payroll_processed BOOLEAN DEFAULT FALSE`);
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_payroll_count INTEGER DEFAULT 0`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -222,7 +275,6 @@ async function initDB() {
     )
   `);
 
-  // Seed default users if none exist
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
     const hash = await bcrypt.hash('tcc2026', 10);
@@ -264,7 +316,6 @@ function canSeePayRate(user) {
 // PTO CALCULATION HELPERS
 // ========================
 
-// Calculates tenure bonus days (Component 2 & 3 from policy) - these are granted, not accrued
 function getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours) {
   const currentYear = new Date().getFullYear();
   const yearsEmployed = currentYear - yearHired;
@@ -273,7 +324,7 @@ function getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours) {
   if (isFullTime && weeklyHours >= 35) {
     if (yearsEmployed >= 5 || isAdmin) {
       const effectiveYears = Math.max(yearsEmployed, 5);
-      additionalDays = effectiveYears + 6; // year5=11, year6=12, etc.
+      additionalDays = effectiveYears + 6;
     } else if (yearsEmployed >= 1) {
       additionalDays = yearsEmployed;
     }
@@ -283,12 +334,11 @@ function getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours) {
   return { additionalDays, additionalHours: additionalDays * hoursPerDay, hoursPerDay, yearsEmployed };
 }
 
-// Static PTO info (used for employee list where we don't need DB query per employee)
 function calculatePTOAllowance(yearHired, isFullTime, isAdmin, weeklyHours) {
   const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
   return {
     baseDays: 10,
-    baseHours: 80, // max accrual cap
+    baseHours: 80,
     additionalDays: tenure.additionalDays,
     additionalHours: tenure.additionalHours,
     totalMaxDays: 10 + tenure.additionalDays,
@@ -299,54 +349,33 @@ function calculatePTOAllowance(yearHired, isFullTime, isAdmin, weeklyHours) {
   };
 }
 
-// Full PTO calculation with actual hours from DB
 async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyHours, carryoverHours) {
   const currentYear = new Date().getFullYear();
   const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
   const hoursPerDay = tenure.hoursPerDay;
   
-  // Component 1: Accrued PTO from actual hours worked this year
   const hoursResult = await pool.query(
     `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours 
      WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
     [empId, currentYear]
   );
   const totalHoursWorked = parseFloat(hoursResult.rows[0].total_hours);
-  const rawAccruedHours = totalHoursWorked / 20; // 1 hour PTO per 20 hours worked
-  const accruedHours = Math.min(rawAccruedHours, 80); // Capped at 80 hours
+  const rawAccruedHours = totalHoursWorked / 20;
+  const accruedHours = Math.min(rawAccruedHours, 80);
   
-  // Component 2+3: Tenure bonus (granted at start of year)
   const tenureBonusHours = tenure.additionalHours;
-  
-  // Carryover from previous year (capped at 80 hours)
   const carryover = Math.min(parseFloat(carryoverHours) || 0, 80);
-  
-  // Total available = carryover + accrued + tenure bonus
   const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
   const totalAvailableDays = totalAvailableHours / hoursPerDay;
   
-  // PTO used this year -- combine QuickBooks confirmed PTO + any P entries from the app for this year
-  const qbResult = await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId]);
-  const qbUsed = parseFloat(qbResult.rows[0]?.pto_hours_used_qb || 0);
-  
-  // Also count P days entered through the app for the current year (as a cross-reference)
-  const pDaysResult = await pool.query(
-    `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND EXTRACT(YEAR FROM entry_date) = $2`,
-    [empId, currentYear]
-  );
-  const pDaysFromApp = parseInt(pDaysResult.rows[0].count);
-  const pHoursFromApp = pDaysFromApp * hoursPerDay;
-  
-  // Use whichever is higher -- QB is the source of truth for confirmed PTO,
-  // but app entries may be more current if QB hasn't been uploaded yet
-  const hoursUsed = Math.max(qbUsed, pHoursFromApp);
+  const qbUsed = parseFloat(carryoverHours === undefined ? 0 : 
+    (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
+  const hoursUsed = qbUsed;
   const daysUsed = Math.round(hoursUsed / hoursPerDay * 10) / 10;
   
-  // Remaining
   const remainingHours = totalAvailableHours - hoursUsed;
   const remainingDays = remainingHours / hoursPerDay;
   
-  // Unpaid days last 6 months
   const sixMonthsAgo = new Date();
   sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
   const unpaidResult = await pool.query(
@@ -357,44 +386,24 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const unpaidLast6Months = parseInt(unpaidResult.rows[0].count);
   
   return {
-    // Hours worked
     totalHoursWorked: Math.round(totalHoursWorked * 100) / 100,
-    
-    // Accrual
     accruedHours: Math.round(accruedHours * 100) / 100,
     accruedDays: Math.round((accruedHours / hoursPerDay) * 100) / 100,
     accrualRate: '1hr per 20hrs worked',
     accrualCap: 80,
-    
-    // Tenure bonus
     tenureBonusDays: tenure.additionalDays,
     tenureBonusHours: Math.round(tenureBonusHours * 100) / 100,
     yearsEmployed: tenure.yearsEmployed,
-    
-    // Carryover
     carryoverHours: carryover,
     carryoverDays: Math.round((carryover / hoursPerDay) * 100) / 100,
-    
-    // Totals
     totalAvailableHours: Math.round(totalAvailableHours * 100) / 100,
     totalAvailableDays: Math.round(totalAvailableDays * 100) / 100,
-    
-    // Used
     daysUsed,
     hoursUsed: Math.round(hoursUsed * 100) / 100,
-    qbHoursUsed: Math.round(qbUsed * 100) / 100,
-    appPDays: pDaysFromApp,
-    appPHours: Math.round(pHoursFromApp * 100) / 100,
-    
-    // Remaining
     remainingHours: Math.round(remainingHours * 100) / 100,
     remainingDays: Math.round(remainingDays * 100) / 100,
-    
-    // Unpaid
     unpaidLast6Months,
     unpaidWarning: unpaidLast6Months > 5,
-    
-    // Info
     hoursPerDay,
     isFullTime,
   };
@@ -409,7 +418,6 @@ function getPayPeriod(date) {
   let start, end, payDate;
   
   if (day >= 9 && day <= 23) {
-    // Current period: 9th-23rd, paid on the 1st of next month
     start = new Date(year, month, 9);
     end = new Date(year, month, 23);
     let nextMonth = month + 1;
@@ -417,7 +425,6 @@ function getPayPeriod(date) {
     if (nextMonth > 11) { nextMonth = 0; payYear++; }
     payDate = new Date(payYear, nextMonth, 1);
   } else {
-    // Current period: 24th-8th, paid on the 15th
     if (day >= 24) {
       start = new Date(year, month, 24);
       let nextMonth = month + 1;
@@ -426,7 +433,6 @@ function getPayPeriod(date) {
       end = new Date(endYear, nextMonth, 8);
       payDate = new Date(endYear, nextMonth, 15);
     } else {
-      // day 1-8
       let prevMonth = month - 1;
       let startYear = year;
       if (prevMonth < 0) { prevMonth = 11; startYear--; }
@@ -436,10 +442,9 @@ function getPayPeriod(date) {
     }
   }
   
-  // Adjust pay date for weekends
   const payDay = payDate.getDay();
-  if (payDay === 6) payDate.setDate(payDate.getDate() - 1); // Sat -> Fri
-  if (payDay === 0) payDate.setDate(payDate.getDate() + 1); // Sun -> Mon
+  if (payDay === 6) payDate.setDate(payDate.getDate() - 1);
+  if (payDay === 0) payDate.setDate(payDate.getDate() + 1);
   
   return {
     start: start.toISOString().split('T')[0],
@@ -450,12 +455,10 @@ function getPayPeriod(date) {
 }
 
 function getMonToSunWeeks(startDate, endDate) {
-  // Get all Mon-Sun weeks that overlap with the pay period
   const start = new Date(startDate);
   const end = new Date(endDate);
   const weeks = [];
   
-  // Find the Monday on or before start
   let monday = new Date(start);
   const startDay = monday.getDay();
   const daysToMonday = startDay === 0 ? 6 : startDay - 1;
@@ -514,29 +517,19 @@ app.get('/api/pay-period', requireAuth, (req, res) => {
   res.json(getPayPeriod(date));
 });
 
-// Employee visibility rules:
-// Owner/Payroll: see everyone
-// Director: see all staff at their center (including themselves), but not admins from other centers
-// HR (Amy): see all non-admin staff + herself, but not owner/payroll/directors
-
 const ADMIN_HIDDEN_FROM_HR = ['wardlaw_jay','wardlaw_mary','swem_kirsten','wardlaw_kelsey','wardlaw_jared','phillips_shari','fountain_gabrielle'];
 
 function shouldHideFromUser(emp, user) {
-  if (user.role === 'owner' || user.role === 'payroll') return false; // See everyone
+  if (user.role === 'owner' || user.role === 'payroll') return false;
   
   const empKey = `${emp.last_name.toLowerCase()}_${emp.first_name.toLowerCase()}`;
-  const userKey = `${user.full_name.toLowerCase().split(' ').reverse().join('_')}`;
-  
+
   if (user.role === 'hr') {
-    // HR sees herself always
     if (empKey.includes('gutierrez') && empKey.includes('amy')) return false;
-    // HR cannot see the admin list
     return ADMIN_HIDDEN_FROM_HR.some(h => empKey.startsWith(h.split('_')[0]) && empKey.includes(h.split('_')[1]));
   }
   
   if (user.role === 'director') {
-    // Directors see everyone at their own center (this is already filtered by the query)
-    // No additional hiding needed -- the SQL WHERE center=$1 handles it
     return false;
   }
   
@@ -551,7 +544,6 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     let params = [];
     
     if (user.role === 'director') {
-      // Directors see their center's staff -- this includes themselves and any admin at their center
       query = 'SELECT * FROM employees WHERE is_active = TRUE AND center = $1 ORDER BY last_name, first_name';
       params = [user.center];
     }
@@ -559,10 +551,8 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     const result = await pool.query(query, params);
     let employees = result.rows;
     
-    // Apply visibility filtering
     employees = employees.filter(e => !shouldHideFromUser(e, user));
     
-    // Hide Mary & Jay Wardlaw from everyone except mary and jared
     if (user.username !== 'mary' && user.username !== 'jared') {
       employees = employees.filter(e => {
         const ln = (e.last_name || '').toLowerCase();
@@ -572,12 +562,10 @@ app.get('/api/employees', requireAuth, async (req, res) => {
       });
     }
     
-    // Strip pay rate for directors
     if (!canSeePayRate(user)) {
       employees = employees.map(e => { const { hourly_rate, ...rest } = e; return rest; });
     }
     
-    // Add PTO calculations
     employees = employees.map(e => ({
       ...e,
       pto: calculatePTOAllowance(e.year_hired, e.is_full_time, e.is_admin, parseFloat(e.weekly_hours) || 40)
@@ -617,7 +605,6 @@ app.put('/api/employees/:id', requireRole('owner', 'hr', 'payroll'), async (req,
   }
 });
 
-// Update PTO carryover for an employee
 app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
   try {
     const { carryover_hours } = req.body;
@@ -631,102 +618,6 @@ app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), 
   }
 });
 
-// Bulk set carryover from 2025 PTO data
-app.post('/api/pto/import-2025', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
-  try {
-    const results = [];
-    const rows = [];
-    const stream = require('stream');
-    const csvParser = require('csv-parser');
-    
-    await new Promise((resolve, reject) => {
-      const s = new stream.Readable();
-      let fileContent = fs.readFileSync(req.file.path, 'utf8');
-      if (fileContent.charCodeAt(0) === 0xFEFF) fileContent = fileContent.substring(1);
-      s.push(fileContent);
-      s.push(null);
-      s.pipe(csvParser()).on('data', r => rows.push(r)).on('end', resolve).on('error', reject);
-    });
-    fs.unlinkSync(req.file.path);
-    
-    for (const row of rows) {
-      // Expected columns: Name (or Last Name, First Name), P Days, U Days
-      // Flexible column matching
-      let lastName = '', firstName = '';
-      const name = row['Name'] || row['name'] || row['Employee'] || row['employee'] || '';
-      if (name.includes(',')) {
-        [lastName, firstName] = name.split(',').map(s => s.trim());
-      } else {
-        lastName = row['Last Name'] || row['last_name'] || row['Last'] || '';
-        firstName = row['First Name'] || row['first_name'] || row['First'] || '';
-      }
-      
-      const pDays = parseFloat(row['P Days'] || row['P'] || row['Paid Days'] || row['PTO Days'] || row['paid_days'] || 0);
-      const uDays = parseFloat(row['U Days'] || row['U'] || row['Unpaid Days'] || row['unpaid_days'] || 0);
-      
-      if (!lastName) continue;
-      
-      // Find employee
-      const emp = await pool.query(
-        `SELECT id, first_name, last_name, year_hired, is_full_time, is_admin, weekly_hours 
-         FROM employees WHERE LOWER(last_name) = LOWER($1) AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%')
-         LIMIT 1`,
-        [lastName.trim(), firstName.trim()]
-      );
-      
-      if (emp.rows.length === 0) {
-        results.push({ name: `${lastName}, ${firstName}`, status: 'not_found' });
-        continue;
-      }
-      
-      const e = emp.rows[0];
-      
-      // Calculate 2025 PTO: hours worked in 2025
-      const hrs2025 = await pool.query(
-        `SELECT COALESCE(SUM(hours_worked), 0) as total FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = 2025`,
-        [e.id]
-      );
-      const hoursWorked2025 = parseFloat(hrs2025.rows[0].total);
-      const accrued2025 = Math.min(hoursWorked2025 / 20, 80);
-      
-      // 2025 tenure bonus
-      const tenure = getTenureBonusDays(e.year_hired, e.is_full_time, e.is_admin, parseFloat(e.weekly_hours) || 40);
-      const tenureHours2025 = tenure.additionalHours;
-      
-      // Total available 2025
-      const totalAvail2025 = accrued2025 + tenureHours2025;
-      
-      // Used in 2025 (P days * 8 hours)
-      const hoursUsed2025 = pDays * 8;
-      
-      // Remaining to carry over (capped at 80)
-      const remaining2025 = Math.max(0, totalAvail2025 - hoursUsed2025);
-      const carryover = Math.min(remaining2025, 80);
-      
-      // Set carryover
-      await pool.query('UPDATE employees SET pto_carryover_hours = $1 WHERE id = $2', [carryover, e.id]);
-      
-      results.push({
-        name: `${e.last_name}, ${e.first_name}`,
-        hoursWorked2025: Math.round(hoursWorked2025 * 10) / 10,
-        accrued2025: Math.round(accrued2025 * 10) / 10,
-        tenureHours: Math.round(tenureHours2025 * 10) / 10,
-        totalAvail: Math.round(totalAvail2025 * 10) / 10,
-        pDaysUsed: pDays,
-        hoursUsed: hoursUsed2025,
-        remaining: Math.round(remaining2025 * 10) / 10,
-        carryover: Math.round(carryover * 10) / 10,
-        status: 'ok'
-      });
-    }
-    
-    res.json({ imported: results.filter(r => r.status === 'ok').length, notFound: results.filter(r => r.status === 'not_found').length, results });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Terminate employee (archive - preserve all data)
 app.post('/api/employees/:id/terminate', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
   try {
     const { terminated_date, termination_reason } = req.body;
@@ -735,7 +626,6 @@ app.post('/api/employees/:id/terminate', requireRole('owner', 'hr', 'payroll'), 
       `UPDATE employees SET is_active = FALSE, terminated_date = $1, termination_reason = $2, terminated_by = $3 WHERE id = $4 RETURNING *`,
       [terminated_date, termination_reason, user.full_name, req.params.id]
     );
-    // Remove from staffing plan
     await pool.query('DELETE FROM staffing_plan WHERE employee_id = $1', [req.params.id]);
     res.json(result.rows[0]);
   } catch (err) {
@@ -743,7 +633,6 @@ app.post('/api/employees/:id/terminate', requireRole('owner', 'hr', 'payroll'), 
   }
 });
 
-// Reinstate terminated employee
 app.post('/api/employees/:id/reinstate', requireRole('owner', 'hr'), async (req, res) => {
   try {
     const result = await pool.query(
@@ -756,7 +645,6 @@ app.post('/api/employees/:id/reinstate', requireRole('owner', 'hr'), async (req,
   }
 });
 
-// Archive / terminated employees list
 app.get('/api/employees/archive', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
   try {
     const result = await pool.query(
@@ -770,7 +658,6 @@ app.get('/api/employees/archive', requireRole('owner', 'payroll', 'hr'), async (
   }
 });
 
-// Employee detail with PTO used, unpaid days
 app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
   try {
     const user = req.session.user;
@@ -783,7 +670,6 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
       return res.status(403).json({ error: 'Access denied' });
     }
     
-    // Check visibility
     if (shouldHideFromUser(employee, user)) {
       return res.status(403).json({ error: 'Access denied' });
     }
@@ -792,14 +678,12 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
       delete employee.hourly_rate;
     }
     
-    // Actual PTO calculation using hours worked
     employee.pto = await calculateActualPTO(
       employee.id, employee.year_hired, employee.is_full_time, 
       employee.is_admin, parseFloat(employee.weekly_hours) || 40,
       employee.pto_carryover_hours || 0
     );
     
-    // Time off entries this year
     const year = new Date().getFullYear();
     const entries = await pool.query(
       `SELECT * FROM time_off_entries WHERE employee_id = $1 AND EXTRACT(YEAR FROM entry_date) = $2 ORDER BY entry_date`,
@@ -807,7 +691,6 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
     );
     employee.timeOffEntries = entries.rows;
     
-    // Pay increase history
     const increases = await pool.query(
       `SELECT pir.*, u.full_name as requested_by_name FROM pay_increase_requests pir LEFT JOIN users u ON pir.requested_by = u.id WHERE pir.employee_id = $1 ORDER BY pir.created_at DESC`,
       [req.params.id]
@@ -816,7 +699,6 @@ app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
       employee.payIncreaseHistory = increases.rows;
     }
     
-    // Documents
     const docs = await pool.query(
       `SELECT id, doc_type, file_name, notes, affects_pay_period, created_at FROM documents WHERE employee_id = $1 ORDER BY created_at DESC`,
       [req.params.id]
@@ -863,19 +745,12 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
     const { employee_id, entry_date, entry_type, notes } = req.body;
     const user = req.session.user;
     
-    // Check if this date is in a past pay period that has been submitted - directors can't edit submitted periods
     if (user.role === 'director') {
+      const currentPP = getPayPeriod(new Date());
       const entryD = new Date(entry_date + 'T12:00:00');
-      const entryPP = getPayPeriod(entryD);
-      
-      // Check if this period has been submitted for this director's center
-      const ppCheck = await pool.query(
-        `SELECT timeoff_submitted FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
-        [entryPP.start, entryPP.end, user.center]
-      );
-      
-      if (ppCheck.rows.length > 0 && ppCheck.rows[0].timeoff_submitted) {
-        return res.status(403).json({ error: 'past_period', message: 'This pay period has been submitted. Use "Request Change" to modify.' });
+      const ppStart = new Date(currentPP.start + 'T12:00:00');
+      if (entryD < ppStart) {
+        return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods. Submit a change request.' });
       }
     }
     
@@ -894,18 +769,14 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
 
 app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
   try {
-    // Check if director is trying to delete from a submitted period
     if (req.session.user.role === 'director') {
       const entry = await pool.query('SELECT entry_date FROM time_off_entries WHERE id = $1', [req.params.id]);
       if (entry.rows.length > 0) {
+        const currentPP = getPayPeriod(new Date());
         const entryD = new Date(entry.rows[0].entry_date);
-        const entryPP = getPayPeriod(entryD);
-        const ppCheck = await pool.query(
-          `SELECT timeoff_submitted FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
-          [entryPP.start, entryPP.end, req.session.user.center]
-        );
-        if (ppCheck.rows.length > 0 && ppCheck.rows[0].timeoff_submitted) {
-          return res.status(403).json({ error: 'past_period', message: 'This pay period has been submitted.' });
+        const ppStart = new Date(currentPP.start + 'T12:00:00');
+        if (entryD < ppStart) {
+          return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods.' });
         }
       }
     }
@@ -916,7 +787,7 @@ app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
   }
 });
 
-// Time off change requests (for past periods)
+// Time off change requests
 app.post('/api/timeoff-change-request', requireAuth, async (req, res) => {
   try {
     const { employee_id, entry_date, requested_type, reason } = req.body;
@@ -952,7 +823,6 @@ app.post('/api/timeoff-change-requests/:id/approve', requireRole('owner', 'payro
     const r = cr.rows[0];
     
     if (r.requested_type) {
-      // Upsert the time off entry
       await pool.query(
         `INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes)
          VALUES ($1, $2, $3, $4, 'Approved change request')
@@ -960,7 +830,6 @@ app.post('/api/timeoff-change-requests/:id/approve', requireRole('owner', 'payro
         [r.employee_id, r.entry_date, r.requested_type, req.session.user.id]
       );
     } else {
-      // Delete the entry (requested_type is null = remove)
       await pool.query('DELETE FROM time_off_entries WHERE employee_id = $1 AND entry_date = $2', [r.employee_id, r.entry_date]);
     }
     
@@ -986,7 +855,7 @@ app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'
   }
 });
 
-// QuickBooks payroll summary upload - parses PTO hours and adds to employee pto_hours_used_qb
+// QuickBooks payroll summary upload
 app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
   try {
     const XLSX = require('xlsx');
@@ -994,11 +863,10 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     const ws = wb.Sheets[wb.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
     
-    // Parse: skip non-PTO pay types
     const skipTypes = new Set(['Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions','Health Insurance','Salary','Bonus','']);
     
     let currentName = null;
-    const ptoPaid = {}; // name -> hours
+    const ptoPaid = {};
     let dateRange = '';
     
     for (let i = 0; i < data.length; i++) {
@@ -1007,7 +875,6 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       const col1 = String(row[1] || '').trim();
       const col2 = parseFloat(row[2]) || 0;
       
-      // Capture date range
       if (col0.startsWith('From ')) dateRange = col0;
       
       if (col0 && col0.includes(',') && col1 === 'Gross') {
@@ -1015,20 +882,17 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       }
       
       if (currentName && col1 && !skipTypes.has(col1) && col2 > 0) {
-        // This is a PTO-type pay entry
         if (!ptoPaid[currentName]) ptoPaid[currentName] = 0;
         ptoPaid[currentName] += col2;
       }
     }
     
-    // Remove Wilson Alexia totals row (absurdly high hours)
     for (const name of Object.keys(ptoPaid)) {
       if (ptoPaid[name] > 200) {
-        delete ptoPaid[name]; // clearly a totals row
+        delete ptoPaid[name];
       }
     }
     
-    // Match to employees and add to pto_hours_used_qb
     let matched = 0;
     const results = [];
     
@@ -1036,7 +900,7 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       const parts = name.split(',').map(s => s.trim());
       if (parts.length < 2) continue;
       const last = parts[0];
-      const first = parts[1].split(' ')[0]; // strip middle initial
+      const first = parts[1].split(' ')[0];
       
       const emp = await pool.query(
         `SELECT id, first_name, last_name, pto_hours_used_qb FROM employees
@@ -1108,7 +972,6 @@ app.put('/api/pay-increases/:id', requireRole('owner', 'payroll'), async (req, r
       [status, review_notes, req.session.user.id, req.params.id]
     );
     
-    // If approved, update employee rate
     if (status === 'approved') {
       const req2 = result.rows[0];
       await pool.query('UPDATE employees SET hourly_rate = $1 WHERE id = $2', [req2.proposed_rate, req2.employee_id]);
@@ -1156,12 +1019,11 @@ function parseBillableHours(str) {
   return 0;
 }
 
-// CSV Timecard import - Playground format
+// CSV Timecard import
 app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), upload.single('file'), async (req, res) => {
   try {
     const results = [];
     
-    // Read file, strip BOM if present
     let fileContent = fs.readFileSync(req.file.path, 'utf8');
     if (fileContent.charCodeAt(0) === 0xFEFF) {
       fileContent = fileContent.substring(1);
@@ -1172,7 +1034,6 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       fs.createReadStream(req.file.path)
         .pipe(csv())
         .on('data', (data) => {
-          // Also strip BOM from any key names just in case
           const clean = {};
           for (const [k, v] of Object.entries(data)) {
             clean[k.replace(/^\uFEFF/, '').trim()] = v;
@@ -1185,10 +1046,9 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     
     fs.unlinkSync(req.file.path);
     
-    // Parse and match to employees
     let matched = 0, unmatched = 0, totalRows = 0;
     const unmatchedNames = new Set();
-    const dailySummary = {}; // {empId-date: hours}
+    const dailySummary = {};
     
     for (const row of results) {
       const lastName = (row['Last Name'] || '').trim();
@@ -1201,46 +1061,17 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       
       const hours = parseBillableHours(billable);
       
-      // Parse date M/D/YYYY
       const dateParts = dateStr.split('/');
       if (dateParts.length !== 3) continue;
       const isoDate = `${dateParts[2]}-${dateParts[0].padStart(2,'0')}-${dateParts[1].padStart(2,'0')}`;
       
-      // Skip placeholder/sub rows
-      if (lastName.toLowerCase() === 'sub' || lastName.toLowerCase() === 'teacher' || firstName.toLowerCase() === 'teacher') continue;
-      
-      // Normalize hyphens/spaces for matching (Lima Will = Lima-Will = Lima-Wills)
-      const lastNorm = lastName.replace(/[-\s]/g, '');
-      
-      // Find matching employee - try exact, then normalized, then partial, then nickname
-      let emp = await pool.query(
+      const emp = await pool.query(
         `SELECT id FROM employees WHERE 
-         (LOWER(last_name) = LOWER($1) 
-          OR LOWER(REPLACE(REPLACE(last_name, '-', ''), ' ', '')) = LOWER($2)
-          OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' 
-          OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
-         AND (LOWER(first_name) = LOWER($3) 
-          OR LOWER(first_name) LIKE LOWER($3) || '%' 
-          OR LOWER($3) LIKE LOWER(first_name) || '%'
-          OR LOWER(first_name) LIKE '%' || LOWER($3) || '%'
-          OR LOWER($3) LIKE '%' || LOWER(first_name) || '%')
+         (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
+         AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%')
          AND is_active = TRUE LIMIT 1`,
-        [lastName, lastNorm, firstName]
+        [lastName, firstName]
       );
-      
-      // If not found, try first 3 chars of first name (catches Gabby/Gabrielle, etc.)
-      if (emp.rows.length === 0 && firstName.length >= 3) {
-        emp = await pool.query(
-          `SELECT id FROM employees WHERE 
-           (LOWER(last_name) = LOWER($1) 
-            OR LOWER(REPLACE(REPLACE(last_name, '-', ''), ' ', '')) = LOWER($2)
-            OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' 
-            OR LOWER(last_name) LIKE '%' || LOWER($1) || '%')
-           AND (LOWER(first_name) LIKE LOWER($3) || '%' OR LOWER(first_name) LIKE '%' || LOWER($3) || '%')
-           AND is_active = TRUE LIMIT 1`,
-          [lastName, lastNorm, firstName.substring(0, 3)]
-        );
-      }
       
       if (emp.rows.length > 0) {
         const empId = emp.rows[0].id;
@@ -1253,14 +1084,8 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       }
     }
     
-    // Upsert daily_hours
     let savedDays = 0;
     for (const [key, hours] of Object.entries(dailySummary)) {
-      const [empId, date] = key.split('-').length > 2 
-        ? [key.substring(0, key.indexOf('-')), key.substring(key.indexOf('-') + 1)]
-        : key.split('-');
-      
-      // Fix: split on first dash only for empId, rest is date
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
@@ -1274,7 +1099,6 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       savedDays++;
     }
     
-    // Build preview data
     const preview = results.slice(0, 40).map(r => ({
       name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
       date: (r['Date']||'').trim(),
@@ -1302,12 +1126,11 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
 app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
   try {
     const payPeriod = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const weeks = getSunSatWeeks(payPeriod.start, payPeriod.end);
+    const weeks = getMonToSunWeeks(payPeriod.start, payPeriod.end);
     
-    // Get daily hours for all overlapping weeks (full Sun-Sat including outside pay period)
     const allDates = [];
     weeks.forEach(w => {
-      for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
         allDates.push(d.toISOString().split('T')[0]);
       }
     });
@@ -1325,7 +1148,7 @@ app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
     const weekDetails = weeks.map(w => {
       let totalHours = 0;
       const days = [];
-      for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
         const ds = d.toISOString().split('T')[0];
         const h = hoursMap[ds] || 0;
         totalHours += h;
@@ -1391,7 +1214,6 @@ app.post('/api/staffing-plan', requireRole('owner', 'hr', 'director'), async (re
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
       [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training]
     );
-    // Sync to employee record
     if (d.employee_id) {
       await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
     }
@@ -1408,7 +1230,6 @@ app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async 
       `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18 WHERE id=$19 RETURNING *`,
       [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, req.params.id]
     );
-    // Sync to employee record
     if (d.employee_id) {
       await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
     }
@@ -1427,7 +1248,7 @@ app.delete('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), asy
   }
 });
 
-// Printable staffing plan - landscape HTML for printing
+// Printable staffing plan
 app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
   try {
     const center = decodeURIComponent(req.params.center);
@@ -1439,15 +1260,12 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
       [center]
     );
 
-    // Deduplicate by employee_id
     const seen = new Set();
     const rows = spData.rows.filter(r => { if (seen.has(r.employee_id)) return false; seen.add(r.employee_id); return true; });
 
-    // Get signature
     const sig = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
     const sigData = sig.rows[0];
 
-    // License info
     const licenseNum = center === 'Montessori' ? 'DC110278344' : 'DC110415511';
     const centerFull = center === 'Montessori' ? 'Montessori Children\'s Center' : `The Children's Center - ${center}`;
 
@@ -1458,11 +1276,9 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
       return m ? parseInt(m[2])+'/'+parseInt(m[3])+'/'+m[1].slice(2) : '';
     }
 
-    // Group by classroom
     const classrooms = {};
     rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
 
-    // Order: regular classrooms first, then floaters, subs, volunteers. Exclude Admin/Office/Food Prep
     const skipSections = ['Admin / Office / Food Prep'];
     const bottomSections = ['Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
     const allClassrooms = Object.keys(classrooms);
@@ -1499,7 +1315,7 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     }
 
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>Staffing Plan -- ${centerFull}</title>
+<title>Staffing Plan — ${centerFull}</title>
 <style>
   @page { size: landscape; margin: 0.3in; }
   * { margin:0; padding:0; box-sizing:border-box; }
@@ -1609,7 +1425,6 @@ app.post('/api/change-password', requireAuth, async (req, res) => {
 // PAYROLL PERIOD WORKFLOW
 // ========================
 
-// Get or create payroll period for a center
 app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
@@ -1618,7 +1433,6 @@ app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
     
     const results = {};
     for (const center of centers) {
-      // Upsert period
       await pool.query(
         `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
          VALUES ($1, $2, $3, $4) ON CONFLICT (period_start, period_end, center) DO NOTHING`,
@@ -1631,7 +1445,6 @@ app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
       results[center] = r.rows[0];
     }
     
-    // Get signatures for this period
     const sigs = await pool.query(
       'SELECT * FROM payroll_signatures WHERE period_start = $1 AND period_end = $2 ORDER BY created_at',
       [pp.start, pp.end]
@@ -1643,19 +1456,10 @@ app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
   }
 });
 
-// Director signs off on timecards
 app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) => {
   try {
     const { period_start, period_end, center, signature_name } = req.body;
     const user = req.session.user;
-    
-    // Ensure period exists
-    await pool.query(
-      `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
-       VALUES ($1, $2, $2, $3)
-       ON CONFLICT (period_start, period_end, center) DO NOTHING`,
-      [period_start, period_end, center]
-    );
     
     await pool.query(
       `UPDATE payroll_periods SET timecards_uploaded = TRUE, timecards_signed_by = $1, timecards_signed_at = NOW()
@@ -1675,14 +1479,11 @@ app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) =
   }
 });
 
-// Director submits time off report as complete
 app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) => {
   try {
-    const { period_start, period_end, center, signature_name } = req.body;
+    const { period_start, period_end, center } = req.body;
     const user = req.session.user;
-    const signedBy = signature_name || user.full_name;
     
-    // Ensure period exists
     await pool.query(
       `INSERT INTO payroll_periods (period_start, period_end, pay_date, center)
        VALUES ($1, $2, $2, $3)
@@ -1693,7 +1494,7 @@ app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) =
     await pool.query(
       `UPDATE payroll_periods SET timeoff_submitted = TRUE, timeoff_submitted_by = $1, timeoff_submitted_at = NOW(), change_request_pending = FALSE
        WHERE period_start = $2 AND period_end = $3 AND center = $4`,
-      [signedBy, period_start, period_end, center]
+      [user.full_name, period_start, period_end, center]
     );
     res.json({ ok: true });
   } catch (err) {
@@ -1701,12 +1502,10 @@ app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) =
   }
 });
 
-// Director unsubmits time off (only if Jared hasn't accessed it yet)
 app.post('/api/payroll-workflow/unsubmit-timeoff', requireAuth, async (req, res) => {
   try {
     const { period_start, period_end, center } = req.body;
     
-    // Check if Jared has accessed it
     const pp = await pool.query(
       `SELECT payroll_accessed_at, payroll_closed FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
       [period_start, period_end, center]
@@ -1727,7 +1526,6 @@ app.post('/api/payroll-workflow/unsubmit-timeoff', requireAuth, async (req, res)
   }
 });
 
-// Director requests a change after Jared has started processing
 app.post('/api/payroll-workflow/request-timeoff-change', requireAuth, async (req, res) => {
   try {
     const { period_start, period_end, center, reason } = req.body;
@@ -1744,7 +1542,6 @@ app.post('/api/payroll-workflow/request-timeoff-change', requireAuth, async (req
   }
 });
 
-// Jared approves a change request (unlocks time off for editing)
 app.post('/api/payroll-workflow/approve-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const { period_start, period_end, center } = req.body;
@@ -1760,7 +1557,6 @@ app.post('/api/payroll-workflow/approve-timeoff-change', requireRole('owner', 'p
   }
 });
 
-// Jared denies a change request
 app.post('/api/payroll-workflow/deny-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const { period_start, period_end, center } = req.body;
@@ -1776,7 +1572,6 @@ app.post('/api/payroll-workflow/deny-timeoff-change', requireRole('owner', 'payr
   }
 });
 
-// Mark payroll as accessed (called when Jared views payroll report)
 app.post('/api/payroll-workflow/mark-accessed', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const { period_start, period_end, center } = req.body;
@@ -1792,7 +1587,6 @@ app.post('/api/payroll-workflow/mark-accessed', requireRole('owner', 'payroll'),
   }
 });
 
-// Director signs off on time-off
 app.post('/api/payroll-workflow/sign-timeoff', requireAuth, async (req, res) => {
   try {
     const { period_start, period_end, center, signature_name } = req.body;
@@ -1816,7 +1610,6 @@ app.post('/api/payroll-workflow/sign-timeoff', requireAuth, async (req, res) => 
   }
 });
 
-// Director closes out their center
 app.post('/api/payroll-workflow/director-close', requireAuth, async (req, res) => {
   try {
     const { period_start, period_end, center, signature_name } = req.body;
@@ -1840,7 +1633,6 @@ app.post('/api/payroll-workflow/director-close', requireAuth, async (req, res) =
   }
 });
 
-// Jared closes out payroll
 app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const { period_start, period_end, signature_name } = req.body;
@@ -1860,12 +1652,6 @@ app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'),
       );
     }
     
-    // Mark all approved pay increases as processed
-    await pool.query(`UPDATE pay_increase_requests SET payroll_processed = TRUE WHERE status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`);
-    
-    // Increment termination report count for recently terminated employees
-    await pool.query(`UPDATE employees SET termination_payroll_count = COALESCE(termination_payroll_count, 0) + 1 WHERE is_active = FALSE AND terminated_date IS NOT NULL AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)`);
-    
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1880,7 +1666,6 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const center = req.query.center;
     
-    // Get employees - include terminated ones (they show if they have hours in this period)
     let empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (
       SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $${center ? 2 : 1} AND dh.work_date <= $${center ? 3 : 2}
     ))`;
@@ -1892,22 +1677,17 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     empQuery += ' ORDER BY e.center, e.last_name, e.first_name';
     const empsResult = await pool.query(empQuery, empParams);
     
-    // Filter based on user visibility
     let empRows = empsResult.rows;
     empRows = empRows.filter(e => !shouldHideFromUser(e, req.session.user));
     
     const report = [];
     
     for (const emp of empRows) {
-      // Daily hours in this pay period
       const hours = await pool.query(
         `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date >= $2 AND work_date <= $3 ORDER BY work_date`,
         [emp.id, pp.start, pp.end]
       );
       
-      // Calculate OT using Sun-Sat weeks
-      const weeks = getMonToSunWeeks(pp.start, pp.end);
-      // Actually we need Sun-Sat weeks
       const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
       
       const allDates = new Set();
@@ -1917,7 +1697,6 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         }
       });
       
-      // Get ALL hours for overlapping weeks (including outside pay period)
       const allHours = await pool.query(
         `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`,
         [emp.id, [...allDates]]
@@ -1942,22 +1721,17 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         }
         
         const weekOT = Math.max(0, weekTotal - 40);
-        // Proportionally allocate OT to in-period days
         const weekReg = weekTotal - weekOT;
         
         weekDetails.push({ ...w, days, weekTotal, weekOT, weekReg, weekInPeriod });
         totalHours += weekInPeriod;
       }
       
-      // Simple OT calc: sum all hours in period, then calculate based on week totals
       let periodRegular = 0, periodOT = 0;
       for (const w of weekDetails) {
         if (w.weekTotal <= 40) {
           periodRegular += w.weekInPeriod;
         } else {
-          // Hours over 40 in this week are OT
-          const otHours = w.weekTotal - 40;
-          // Determine how many OT hours fall within the pay period
           let inPeriodAfter40 = 0;
           let runningTotal = 0;
           for (const day of w.days) {
@@ -1973,27 +1747,22 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         }
       }
       
-      // PTO in this period
       const pto = await pool.query(
         `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
         [emp.id, pp.start, pp.end]
       );
       const ptoDays = parseInt(pto.rows[0].count);
       
-      // Unpaid in this period
       const unpaid = await pool.query(
         `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2 AND entry_date <= $3`,
         [emp.id, pp.start, pp.end]
       );
       const unpaidDays = parseInt(unpaid.rows[0].count);
       
-      // Pay increases -- show all unprocessed approved increases
       const increases = await pool.query(
-        `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`,
-        [emp.id]
+        `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`,
+        [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']
       );
-      
-      const isNewHire = emp.start_date && new Date(emp.start_date).toISOString().split('T')[0] >= pp.start && new Date(emp.start_date).toISOString().split('T')[0] <= pp.end;
       
       report.push({
         id: emp.id,
@@ -2003,365 +1772,18 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         position: emp.position,
         hourly_rate: emp.hourly_rate,
         is_full_time: emp.is_full_time,
-        start_date: emp.start_date,
         totalHours: Math.round(totalHours * 100) / 100,
         regularHours: Math.round(periodRegular * 100) / 100,
         overtimeHours: Math.round(periodOT * 100) / 100,
         ptoDays,
         unpaidDays,
         payIncreases: increases.rows,
-        weekDetails,
-        isNewHire
+        weekDetails
       });
     }
     
-    // Get recently terminated employees that still need to appear on report
-    // termination_payroll_count < 2 means they haven't been on 2 payroll reports yet
-    const terminations = await pool.query(
-      `SELECT id, first_name, last_name, center, position, hourly_rate, terminated_date, termination_reason, terminated_by, termination_payroll_count
-       FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL 
-       AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)
-       ORDER BY terminated_date DESC`
-    );
-    
-    res.json({ payPeriod: pp, report, terminations: terminations.rows });
+    res.json({ payPeriod: pp, report });
   } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// Generate downloadable PDF payroll report -- all centers, with W-4s
-app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { PDFDocument, StandardFonts, rgb } = require('pdf-lib');
-    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    
-    // Find W-4 documents uploaded since last payroll was closed
-    // Get the previous pay period's close date
-    const prevDate = new Date(pp.start + 'T12:00:00');
-    prevDate.setDate(prevDate.getDate() - 1);
-    const prevPP = getPayPeriod(prevDate);
-    
-    let lastClosedDate = prevPP.start; // default
-    const lastClosed = await pool.query(
-      `SELECT MAX(payroll_closed_at) as closed_at FROM payroll_periods WHERE payroll_closed = TRUE`
-    );
-    if (lastClosed.rows[0]?.closed_at) {
-      lastClosedDate = lastClosed.rows[0].closed_at.toISOString().split('T')[0];
-    }
-    
-    // Get W-4 docs uploaded since last close
-    const w4Docs = await pool.query(
-      `SELECT d.*, e.first_name, e.last_name, e.center FROM documents d
-       JOIN employees e ON d.employee_id = e.id
-       WHERE LOWER(d.doc_type) LIKE '%w-4%' OR LOWER(d.doc_type) LIKE '%w4%'
-       AND d.created_at >= $1
-       ORDER BY d.created_at`,
-      [lastClosedDate]
-    );
-    
-    // Build payroll report data for ALL centers
-    const allReport = {};
-    for (const center of ['Peace Boulevard', 'Niles', 'Montessori']) {
-      const empsResult = await pool.query(
-        `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (
-          SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2
-        )) AND e.center = $3 ORDER BY e.last_name, e.first_name`,
-        [pp.start, pp.end, center]
-      );
-      
-      let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, req.session.user));
-      const centerReport = [];
-      
-      for (const emp of empRows) {
-        const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
-        const allDates = new Set();
-        sunSatWeeks.forEach(w => {
-          for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
-            allDates.add(d.toISOString().split('T')[0]);
-        });
-        
-        const allHours = await pool.query(
-          `SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`,
-          [emp.id, [...allDates]]
-        );
-        const hoursMap = {};
-        allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
-        
-        let totalHours = 0, periodRegular = 0, periodOT = 0;
-        for (const w of sunSatWeeks) {
-          let weekTotal = 0, weekInPeriod = 0;
-          const days = [];
-          for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
-            const ds = d.toISOString().split('T')[0];
-            const h = hoursMap[ds] || 0;
-            weekTotal += h;
-            const inPeriod = ds >= pp.start && ds <= pp.end;
-            if (inPeriod) weekInPeriod += h;
-            days.push({ date: ds, hours: h, inPeriod });
-          }
-          totalHours += weekInPeriod;
-          if (weekTotal <= 40) { periodRegular += weekInPeriod; }
-          else {
-            let inPeriodAfter40 = 0, runningTotal = 0;
-            for (const day of days) {
-              runningTotal += day.hours;
-              if (day.inPeriod && runningTotal > 40) inPeriodAfter40 += Math.min(day.hours, runningTotal - 40);
-            }
-            periodOT += inPeriodAfter40;
-            periodRegular += (weekInPeriod - inPeriodAfter40);
-          }
-        }
-        
-        const pto = await pool.query(
-          `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
-          [emp.id, pp.start, pp.end]
-        );
-        
-        const increases = await pool.query(
-          `SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND (payroll_processed IS NULL OR payroll_processed = FALSE)`,
-          [emp.id]
-        );
-        
-        // Check if this is a new hire during this pay period
-        const isNewHire = emp.start_date && emp.start_date.toISOString().split('T')[0] >= pp.start && emp.start_date.toISOString().split('T')[0] <= pp.end;
-        
-        if (totalHours > 0 || parseInt(pto.rows[0].count) > 0 || isNewHire || increases.rows.length > 0) {
-          centerReport.push({
-            name: `${emp.last_name}, ${emp.first_name}`,
-            regularHours: Math.round(periodRegular * 100) / 100,
-            overtimeHours: Math.round(periodOT * 100) / 100,
-            totalHours: Math.round(totalHours * 100) / 100,
-            ptoDays: parseInt(pto.rows[0].count),
-            payIncreases: increases.rows,
-            isNewHire
-          });
-        }
-      }
-      allReport[center] = centerReport;
-    }
-    
-    // Build PDF
-    const pdfDoc = await PDFDocument.create();
-    const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-    const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-    const navy = rgb(0.106, 0.165, 0.290);
-    const gold = rgb(0.784, 0.588, 0.243);
-    const black = rgb(0, 0, 0);
-    const gray = rgb(0.4, 0.4, 0.4);
-    const white = rgb(1, 1, 1);
-    
-    // W-4s are now included inline with the New Employees section below
-    
-    // Add payroll report pages
-    
-    // Helper to get current page and handle page breaks
-    function getPage() { return pdfDoc.getPages()[pdfDoc.getPageCount() - 1]; }
-    
-    // ---- PAGE: Pay Increases ----
-    const allIncreases = [];
-    for (const [center, emps] of Object.entries(allReport)) {
-      emps.forEach(emp => {
-        if (emp.payIncreases && emp.payIncreases.length > 0) {
-          emp.payIncreases.forEach(pi => allIncreases.push({ ...pi, empName: emp.name, center }));
-        }
-      });
-    }
-    
-    if (allIncreases.length > 0) {
-      const piPage = pdfDoc.addPage([612, 792]);
-      let y = 750;
-      piPage.drawText('Pay Increases This Period', { x: 30, y, size: 14, font: fontBold, color: navy });
-      y -= 18;
-      piPage.drawText(pp.label, { x: 30, y, size: 10, font, color: gray });
-      y -= 8;
-      piPage.drawRectangle({ x: 30, y, width: 552, height: 2, color: gold });
-      y -= 20;
-      
-      const piCols = [30, 200, 300, 380, 470];
-      const piHeaders = ['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'];
-      piPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      piHeaders.forEach((h, i) => piPage.drawText(h, { x: piCols[i] + 2, y, size: 8, font: fontBold, color: white }));
-      y -= 20;
-      
-      allIncreases.forEach(pi => {
-        piPage.drawText(pi.empName, { x: piCols[0] + 2, y, size: 8, font, color: black });
-        piPage.drawText(pi.center, { x: piCols[1] + 2, y, size: 8, font, color: black });
-        piPage.drawText('$' + parseFloat(pi.current_rate).toFixed(2), { x: piCols[2] + 2, y, size: 8, font, color: black });
-        piPage.drawText('$' + parseFloat(pi.proposed_rate).toFixed(2), { x: piCols[3] + 2, y, size: 8, font: fontBold, color: rgb(0.1, 0.5, 0.1) });
-        piPage.drawText(pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : '', { x: piCols[4] + 2, y, size: 8, font, color: gray });
-        y -= 14;
-      });
-    }
-    
-    // ---- PAGE: New Employees ----
-    const newEmps = await pool.query(
-      `SELECT e.*, 
-        (SELECT COUNT(*) FROM documents d WHERE d.employee_id = e.id AND (LOWER(d.doc_type) LIKE '%w-4%' OR LOWER(d.doc_type) LIKE '%w4%')) as has_w4
-       FROM employees e WHERE e.start_date >= $1 AND e.start_date <= $2 AND e.is_active = TRUE
-       ORDER BY e.center, e.last_name`,
-      [pp.start, pp.end]
-    );
-    
-    if (newEmps.rows.length > 0) {
-      const nePage = pdfDoc.addPage([612, 792]);
-      let y = 750;
-      nePage.drawText('New Employees This Period', { x: 30, y, size: 14, font: fontBold, color: navy });
-      y -= 18;
-      nePage.drawText(pp.label, { x: 30, y, size: 10, font, color: gray });
-      y -= 8;
-      nePage.drawRectangle({ x: 30, y, width: 552, height: 2, color: gold });
-      y -= 20;
-      
-      const neCols = [30, 200, 300, 400, 480];
-      const neHeaders = ['Employee', 'Center', 'Position', 'Start Date', 'Rate'];
-      nePage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      neHeaders.forEach((h, i) => nePage.drawText(h, { x: neCols[i] + 2, y, size: 8, font: fontBold, color: white }));
-      y -= 20;
-      
-      for (const emp of newEmps.rows) {
-        nePage.drawText(`${emp.last_name}, ${emp.first_name}`, { x: neCols[0] + 2, y, size: 8, font, color: black });
-        nePage.drawText(emp.center, { x: neCols[1] + 2, y, size: 8, font, color: black });
-        nePage.drawText(emp.position || '', { x: neCols[2] + 2, y, size: 8, font, color: black });
-        nePage.drawText(emp.start_date ? new Date(emp.start_date).toLocaleDateString() : '', { x: neCols[3] + 2, y, size: 8, font, color: black });
-        nePage.drawText(emp.hourly_rate ? '$' + parseFloat(emp.hourly_rate).toFixed(2) : '--', { x: neCols[4] + 2, y, size: 8, font, color: black });
-        y -= 14;
-        
-        // Add their W-4 if it exists
-        if (parseInt(emp.has_w4) > 0) {
-          const w4 = await pool.query(
-            `SELECT file_name, file_data FROM documents WHERE employee_id = $1 AND (LOWER(doc_type) LIKE '%w-4%' OR LOWER(doc_type) LIKE '%w4%') ORDER BY created_at DESC LIMIT 1`,
-            [emp.id]
-          );
-          if (w4.rows.length > 0) {
-            try {
-              const doc = w4.rows[0];
-              if (doc.file_name.toLowerCase().endsWith('.pdf')) {
-                const w4Pdf = await PDFDocument.load(doc.file_data);
-                const pages = await pdfDoc.copyPages(w4Pdf, w4Pdf.getPageIndices());
-                pages.forEach(p => pdfDoc.addPage(p));
-              } else {
-                const imgPage = pdfDoc.addPage([612, 792]);
-                let img;
-                if (doc.file_name.toLowerCase().match(/\.png$/)) img = await pdfDoc.embedPng(doc.file_data);
-                else img = await pdfDoc.embedJpg(doc.file_data);
-                const scale = Math.min(552 / img.width, 700 / img.height);
-                imgPage.drawImage(img, { x: 30, y: 792 - 46 - img.height * scale, width: img.width * scale, height: img.height * scale });
-                imgPage.drawText(`W-4: ${emp.first_name} ${emp.last_name} (${emp.center})`, { x: 30, y: 762, size: 10, font: fontBold, color: navy });
-              }
-            } catch(e) { /* skip unreadable */ }
-          }
-        }
-      }
-    }
-    
-    // ---- PAGE: Terminations ----
-    const termEmps = await pool.query(
-      `SELECT first_name, last_name, center, position, terminated_date, termination_reason, terminated_by, termination_payroll_count
-       FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL 
-       AND (termination_payroll_count IS NULL OR termination_payroll_count < 2)
-       ORDER BY terminated_date DESC`
-    );
-    
-    if (termEmps.rows.length > 0) {
-      const termPage = pdfDoc.addPage([612, 792]);
-      let y = 750;
-      termPage.drawText('Terminations -- Action Required', { x: 30, y, size: 14, font: fontBold, color: rgb(0.8, 0.1, 0.1) });
-      y -= 18;
-      termPage.drawText(`${pp.label} · Verify removed from QuickBooks`, { x: 30, y, size: 10, font, color: gray });
-      y -= 8;
-      termPage.drawRectangle({ x: 30, y, width: 552, height: 2, color: rgb(0.8, 0.1, 0.1) });
-      y -= 20;
-      
-      const tCols = [30, 180, 270, 350, 450];
-      const tHeaders = ['Employee', 'Center', 'Last Day', 'Reason', 'Status'];
-      termPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      tHeaders.forEach((h, i) => termPage.drawText(h, { x: tCols[i] + 2, y, size: 8, font: fontBold, color: white }));
-      y -= 20;
-      
-      termEmps.rows.forEach(t => {
-        const count = t.termination_payroll_count || 0;
-        const status = count === 0 ? 'NEW - Remove from QB' : 'VERIFY removed from QB';
-        termPage.drawText(`${t.last_name}, ${t.first_name}`, { x: tCols[0] + 2, y, size: 8, font, color: black });
-        termPage.drawText(t.center, { x: tCols[1] + 2, y, size: 8, font, color: black });
-        termPage.drawText(t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '--', { x: tCols[2] + 2, y, size: 8, font, color: black });
-        termPage.drawText((t.termination_reason || '--').substring(0, 30), { x: tCols[3] + 2, y, size: 7, font, color: gray });
-        termPage.drawText(status, { x: tCols[4] + 2, y, size: 7, font: fontBold, color: count === 0 ? rgb(0.8, 0.1, 0.1) : rgb(0.7, 0.5, 0) });
-        y -= 14;
-      });
-    }
-    
-    // ---- PAGES: Center Reports ----
-    function addReportPage(centerName, employees) {
-      const page = pdfDoc.addPage([612, 792]);
-      let y = 750;
-      
-      page.drawText('The Children\'s Center -- Payroll Report', { x: 30, y: y, size: 14, font: fontBold, color: navy });
-      y -= 18;
-      page.drawText(`${centerName} · ${pp.label} · Pay Date: ${pp.payDate}`, { x: 30, y: y, size: 10, font, color: gray });
-      y -= 8;
-      page.drawRectangle({ x: 30, y: y, width: 552, height: 2, color: gold });
-      y -= 20;
-      
-      const cols = [30, 200, 280, 350, 420, 480];
-      const headers = ['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Hrs', 'Pay Increases'];
-      page.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      headers.forEach((h, i) => {
-        page.drawText(h, { x: cols[i] + 2, y: y, size: 8, font: fontBold, color: white });
-      });
-      y -= 20;
-      
-      let totalReg = 0, totalOT = 0, totalHrs = 0;
-      
-      employees.forEach(emp => {
-        if (y < 60) {
-          const np = pdfDoc.addPage([612, 792]);
-          y = 750;
-          np.drawText(`${centerName} (continued)`, { x: 30, y: y, size: 10, font: fontBold, color: navy });
-          y -= 20;
-        }
-        
-        const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
-        const hasPTO = emp.ptoDays > 0;
-        
-        // Highlight row if employee has PTO
-        if (hasPTO) {
-          currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 14, color: rgb(0.92, 0.96, 1.0) });
-        }
-        
-        currentPage.drawText(emp.name + (hasPTO ? '  *PTO*' : ''), { x: cols[0] + 2, y: y, size: 8, font: hasPTO ? fontBold : font, color: black });
-        currentPage.drawText(emp.regularHours.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font, color: black });
-        currentPage.drawText(emp.overtimeHours > 0 ? emp.overtimeHours.toFixed(2) : '--', { x: cols[2] + 2, y: y, size: 8, font, color: emp.overtimeHours > 0 ? rgb(0.8, 0.1, 0.1) : gray });
-        currentPage.drawText(emp.totalHours.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: black });
-        currentPage.drawText(hasPTO ? (emp.ptoDays * 8).toFixed(2) : '--', { x: cols[4] + 2, y: y, size: 8, font: hasPTO ? fontBold : font, color: hasPTO ? rgb(0.1, 0.3, 0.7) : black });
-        const incText = emp.payIncreases.length > 0 ? emp.payIncreases.map(pi => '$' + parseFloat(pi.current_rate).toFixed(2) + '->$' + parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '--';
-        currentPage.drawText(incText, { x: cols[5] + 2, y: y, size: 7, font, color: black });
-        
-        totalReg += emp.regularHours;
-        totalOT += emp.overtimeHours;
-        totalHrs += emp.totalHours;
-        y -= 14;
-      });
-      
-      const currentPage = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
-      y -= 4;
-      currentPage.drawRectangle({ x: 30, y: y - 4, width: 552, height: 16, color: navy });
-      currentPage.drawText('TOTAL -- ' + centerName, { x: cols[0] + 2, y: y, size: 8, font: fontBold, color: white });
-      currentPage.drawText(totalReg.toFixed(2), { x: cols[1] + 2, y: y, size: 8, font: fontBold, color: white });
-      currentPage.drawText(totalOT.toFixed(2), { x: cols[2] + 2, y: y, size: 8, font: fontBold, color: white });
-      currentPage.drawText(totalHrs.toFixed(2), { x: cols[3] + 2, y: y, size: 8, font: fontBold, color: white });
-    }
-    
-    for (const [center, emps] of Object.entries(allReport)) {
-      if (emps.length > 0) addReportPage(center, emps);
-    }
-    
-    const pdfBytes = await pdfDoc.save();
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="Payroll_Report_${pp.start}_${pp.end}.pdf"`);
-    res.send(Buffer.from(pdfBytes));
-  } catch (err) {
-    console.error('PDF generation error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -2371,7 +1793,6 @@ function getSunSatWeeks(startDate, endDate) {
   const end = new Date(endDate + 'T12:00:00');
   const weeks = [];
   
-  // Find the Sunday on or before start
   let sunday = new Date(start);
   const startDay = sunday.getDay();
   sunday.setDate(sunday.getDate() - startDay);
@@ -2390,19 +1811,15 @@ function getSunSatWeeks(startDate, endDate) {
   return weeks;
 }
 
-// Get adjacent pay periods for navigation
 app.get('/api/pay-periods/list', requireAuth, async (req, res) => {
   try {
     const current = getPayPeriod(new Date());
     const periods = [];
     
-    // Generate 6 months back and 2 forward
     for (let i = -12; i <= 4; i++) {
       const d = new Date();
-      // Approximate: shift by half-months
       d.setDate(d.getDate() + (i * 15));
       const pp = getPayPeriod(d);
-      // Deduplicate
       if (!periods.find(p => p.start === pp.start)) {
         pp.isCurrent = pp.start === current.start;
         periods.push(pp);
@@ -2416,7 +1833,6 @@ app.get('/api/pay-periods/list', requireAuth, async (req, res) => {
   }
 });
 
-// Smart default pay period based on role
 app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
   try {
     const user = req.session.user;
@@ -2424,27 +1840,20 @@ app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
     const currentPP = getPayPeriod(now);
     
     if (user.role === 'payroll') {
-      // Jared: show the period being processed (current paycheck)
-      // On Mar 24, the Mar 9-23 period is being processed for Apr 1 paycheck
-      // Check if the current period is closed; if so, show next
       const status = await pool.query(
         `SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND payroll_closed = TRUE LIMIT 1`,
         [currentPP.start, currentPP.end]
       );
       if (status.rows.length > 0) {
-        // Current is closed, show next period
         const nextDate = new Date(currentPP.end + 'T12:00:00');
         nextDate.setDate(nextDate.getDate() + 1);
         res.json(getPayPeriod(nextDate));
       } else {
-        // Show the period that just ended (needs processing)
-        // On Mar 24 (which is in the Mar24-Apr8 period), show Mar9-23
         const prevDate = new Date(currentPP.start + 'T12:00:00');
         prevDate.setDate(prevDate.getDate() - 1);
         res.json(getPayPeriod(prevDate));
       }
     } else if (user.role === 'director') {
-      // Directors: show current period unless it's submitted, then show next
       const status = await pool.query(
         `SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3 AND director_closed = TRUE`,
         [currentPP.start, currentPP.end, user.center]
@@ -2457,7 +1866,6 @@ app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
         res.json(currentPP);
       }
     } else {
-      // Owner/HR: show current period
       res.json(currentPP);
     }
   } catch (err) {
@@ -2465,10 +1873,40 @@ app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
   }
 });
 
-// Serve the frontend
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+// ─── STATIC + CATCH-ALL (with Hub SSO fetch patch injection) ────────────────
+app.get('/', (req, res) => {
+  const hubToken = req.query.hub_token;
+  if (hubToken) {
+    const indexPath = path.join(__dirname, 'public', 'index.html');
+    let html = fs.readFileSync(indexPath, 'utf-8');
+    const patchScript = `<script>
+(function(){
+  var HUB_TOKEN = ${JSON.stringify(hubToken)};
+  var originalFetch = window.fetch;
+  window.fetch = function(url, opts) {
+    opts = opts || {};
+    if (typeof url === 'string' && url.startsWith('/api/')) {
+      opts.headers = opts.headers || {};
+      if (opts.headers instanceof Headers) {
+        opts.headers.set('Authorization', 'Bearer ' + HUB_TOKEN);
+      } else {
+        opts.headers['Authorization'] = 'Bearer ' + HUB_TOKEN;
+      }
+    }
+    return originalFetch.call(this, url, opts);
+  };
+  window._hubSSO = true;
+})();
+</script>`;
+    html = html.replace('</head>', patchScript + '</head>');
+    return res.send(html);
+  }
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 app.use(express.static(path.join(__dirname, 'public')));
-app.get('{*path}', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
+app.get('{*path}', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // Start
 initDB().then(() => {
