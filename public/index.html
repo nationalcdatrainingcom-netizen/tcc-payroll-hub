@@ -721,7 +721,6 @@ async function renderDashboard() {
   html += `<div class="card"><div class="card-header"><h3>PTO Summary — ${isDirector ? currentUser.center : (dashboardCenter === 'all' ? 'All Centers' : dashboardCenter)}</h3>
     <div style="display:flex;gap:8px">
       <button class="btn btn-outline btn-sm" onclick="loadPTOSummary()">Refresh</button>
-      ${['owner','payroll'].includes(currentUser.role) ? '<button class="btn btn-gold btn-sm" onclick="show2025PTOImport()">Import 2025 PTO Carryover</button>' : ''}
     </div>
   </div><div class="card-body">
     <div id="ptoSummaryArea"><em style="color:var(--gray-400)">Loading PTO data...</em></div>
