@@ -1690,6 +1690,12 @@ async function denyTimeOffChange() {
 }
 
 async function toggleTimeOff(empId, date, btn) {
+  // Directors cannot edit dates before system go-live
+  if (currentUser.role === 'director' && date < '2026-03-09') {
+    alert('This date is in a closed pay period. Click the cell to submit a change request instead.');
+    return;
+  }
+  
   const current = btn.textContent.trim();
   let newType;
   
@@ -1829,9 +1835,12 @@ async function renderTimeOffCalendar() {
           <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
         </td>`;
       } else if (isDir) {
-        // Directors: edit current pay period, request changes for past closed periods
-        const isClosed = isDateInClosedPeriod(ds);
-        const isCurrent = isDateInCurrentPP(ds);
+        // Directors: edit current pay period, request changes for past/closed periods
+        // Hard cutoff: everything before March 9, 2026 is locked (system go-live date)
+        const hardCutoff = '2026-03-09';
+        const isBeforeCutoff = ds < hardCutoff;
+        const isClosed = isBeforeCutoff || isDateInClosedPeriod(ds);
+        const isCurrent = !isClosed && isDateInCurrentPP(ds);
         const isFuture = !isClosed && !isCurrent;
         
         if (isCurrent || isFuture) {
