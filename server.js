@@ -50,23 +50,31 @@ app.use(async (req, res, next) => {
   try {
     const decoded = jwt.verify(token, HUB_JWT_SECRET);
     const hubUsername = decoded.username.toLowerCase();
+    const hubRole = decoded.role;
+    const hubCenter = decoded.center;
 
-    // Find matching Payroll Hub user
+    // 1. Try exact username match
     const result = await pool.query('SELECT * FROM users WHERE LOWER(username) = $1', [hubUsername]);
     let user = result.rows[0];
 
-    // If not found by username, try mapping by role
-    if (!user && decoded.role === 'owner') {
+    // 2. For directors, try matching by center (Hub stores 'peace', Payroll stores 'Peace Boulevard')
+    if (!user && hubCenter && hubCenter !== 'all') {
+      const centerMap = { 'peace': 'Peace Boulevard', 'niles': 'Niles', 'montessori': 'Montessori' };
+      const mappedCenter = centerMap[hubCenter] || hubCenter;
+      const dirResult = await pool.query("SELECT * FROM users WHERE role = 'director' AND center = $1 LIMIT 1", [mappedCenter]);
+      user = dirResult.rows[0];
+    }
+
+    // 3. Only fall back to owner if the Hub token says owner — NEVER for directors
+    if (!user && hubRole === 'owner') {
       const ownerResult = await pool.query("SELECT * FROM users WHERE role = 'owner' LIMIT 1");
       user = ownerResult.rows[0];
     }
 
-    // Try matching directors by center
-    if (!user && decoded.center && decoded.center !== 'all') {
-      const centerMap = { 'peace': 'Peace Boulevard', 'niles': 'Niles', 'montessori': 'Montessori' };
-      const mappedCenter = centerMap[decoded.center] || decoded.center;
-      const dirResult = await pool.query("SELECT * FROM users WHERE role = 'director' AND center = $1 LIMIT 1", [mappedCenter]);
-      user = dirResult.rows[0];
+    // 4. For HR/payroll roles, try matching by role
+    if (!user && (hubRole === 'hr' || hubRole === 'payroll')) {
+      const roleResult = await pool.query("SELECT * FROM users WHERE role = $1 LIMIT 1", [hubRole]);
+      user = roleResult.rows[0];
     }
 
     if (user) {
