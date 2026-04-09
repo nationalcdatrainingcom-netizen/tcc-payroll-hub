@@ -8,6 +8,7 @@ const csv = require('csv-parser');
 const fs = require('fs');
 const path = require('path');
 const jwt = require('jsonwebtoken');
+const PDFDocument = require('pdfkit');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -249,6 +250,7 @@ async function initDB() {
       pay_date DATE,
       period_label VARCHAR(200),
       report_data JSONB NOT NULL,
+      pdf_data BYTEA,
       generated_by VARCHAR(200),
       generated_by_user_id INTEGER REFERENCES users(id),
       notes TEXT,
@@ -256,6 +258,8 @@ async function initDB() {
       UNIQUE(period_start, period_end)
     )
   `);
+  // Migration: add pdf_data column if table already exists without it
+  await pool.query(`ALTER TABLE payroll_report_archives ADD COLUMN IF NOT EXISTS pdf_data BYTEA`);
 
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
@@ -1299,12 +1303,348 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
 });
 
 // ========================
-// NEW: PAYROLL REPORT ARCHIVES
+// PAYROLL REPORT PDF GENERATION
+// ========================
+async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
+  return new Promise((resolve, reject) => {
+    const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
+    const chunks = [];
+    doc.on('data', c => chunks.push(c));
+    doc.on('end', () => resolve(Buffer.concat(chunks)));
+    doc.on('error', reject);
+
+    const navy = '#1B2A4A';
+    const gold = '#C8963E';
+    const gray = '#5A6270';
+    const lightGray = '#F0F2F5';
+    const danger = '#C0392B';
+    const success = '#2E7D4F';
+    const pageW = 612 - 80; // letter width minus margins
+
+    // --- HEADER ---
+    doc.rect(0, 0, 612, 70).fill(navy);
+    doc.fill('#FFFFFF').fontSize(18).font('Helvetica-Bold').text('TCC Payroll Report', 40, 20);
+    doc.fontSize(11).font('Helvetica').text(`Pay Period: ${pp.label}`, 40, 42);
+    doc.text(`Pay Date: ${new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', year:'numeric'})}`, 40, 55, { continued: false });
+    doc.fill(gold).fontSize(9).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 172 });
+    doc.text('The Children\'s Center', 400, 38, { align: 'right', width: 172 });
+
+    doc.y = 85;
+
+    // Helper: draw a table
+    function drawTable(headers, rows, colWidths, opts = {}) {
+      const startY = doc.y;
+      const rowH = 18;
+      const headerH = 22;
+      let y = startY;
+
+      // Check page break
+      const neededH = headerH + (rows.length * rowH) + 10;
+      if (y + neededH > 720) { doc.addPage(); y = 40; }
+
+      // Header row
+      doc.rect(40, y, pageW, headerH).fill(navy);
+      let x = 40;
+      headers.forEach((h, i) => {
+        doc.fill('#FFFFFF').fontSize(8).font('Helvetica-Bold')
+          .text(h, x + 4, y + 6, { width: colWidths[i] - 8, align: opts.aligns?.[i] || 'left' });
+        x += colWidths[i];
+      });
+      y += headerH;
+
+      // Data rows
+      rows.forEach((row, ri) => {
+        if (y + rowH > 730) { doc.addPage(); y = 40; }
+        const bg = row._bg || (ri % 2 === 0 ? '#FFFFFF' : lightGray);
+        doc.rect(40, y, pageW, rowH).fill(bg);
+        x = 40;
+        row.cells.forEach((cell, ci) => {
+          const color = cell.color || navy;
+          const font = cell.bold ? 'Helvetica-Bold' : 'Helvetica';
+          doc.fill(color).fontSize(9).font(font)
+            .text(String(cell.text || ''), x + 4, y + 5, { width: colWidths[ci] - 8, align: opts.aligns?.[ci] || 'left' });
+          x += colWidths[ci];
+        });
+        y += rowH;
+      });
+      doc.y = y + 6;
+    }
+
+    // Helper: section header
+    function sectionHeader(title, color) {
+      if (doc.y > 680) doc.addPage();
+      doc.y += 8;
+      doc.rect(40, doc.y, pageW, 2).fill(color || gold);
+      doc.y += 6;
+      doc.fill(color || navy).fontSize(13).font('Helvetica-Bold').text(title, 40, doc.y);
+      doc.y += 20;
+    }
+
+    // --- SECTION 1: Pay Increases ---
+    const allIncreases = [];
+    report.forEach(e => {
+      if (e.payIncreases && e.payIncreases.length > 0) {
+        e.payIncreases.forEach(pi => allIncreases.push({ ...pi, empName: `${e.last_name}, ${e.first_name}`, center: e.center }));
+      }
+    });
+    if (allIncreases.length > 0) {
+      sectionHeader('Pay Increases This Period');
+      const piRows = allIncreases.map(pi => ({
+        cells: [
+          { text: pi.empName, bold: true },
+          { text: pi.center },
+          { text: '$' + parseFloat(pi.current_rate).toFixed(2) },
+          { text: '$' + parseFloat(pi.proposed_rate).toFixed(2), color: success, bold: true },
+          { text: pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : '' }
+        ]
+      }));
+      drawTable(['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'],
+        piRows, [160, 110, 90, 90, 82]);
+    }
+
+    // --- SECTION 2: New Employees ---
+    const ppStart = new Date(pp.start + 'T12:00:00');
+    const ppEnd = new Date(pp.end + 'T12:00:00');
+    const newEmps = report.filter(e => {
+      if (!e.start_date) return false;
+      const sd = new Date(e.start_date);
+      return sd >= ppStart && sd <= ppEnd;
+    });
+    // Also check from the full employee data passed in
+    if (newHireW4s && newHireW4s.length > 0) {
+      sectionHeader('New Employees This Period');
+      const neRows = newHireW4s.map(e => ({
+        cells: [
+          { text: `${e.last_name}, ${e.first_name}`, bold: true },
+          { text: e.center },
+          { text: e.position || '' },
+          { text: e.start_date ? new Date(e.start_date).toLocaleDateString() : '' },
+          { text: e.hourly_rate ? '$' + parseFloat(e.hourly_rate).toFixed(2) : '' },
+          { text: e.hasW4 ? 'See attached' : 'Missing' }
+        ]
+      }));
+      drawTable(['Name', 'Center', 'Position', 'Start Date', 'Rate', 'W-4'],
+        neRows, [140, 100, 80, 80, 70, 62]);
+    }
+
+    // --- SECTION 3: Terminations ---
+    if (terminations && terminations.length > 0) {
+      sectionHeader('Terminations — Action Required', danger);
+      doc.fill(gray).fontSize(9).font('Helvetica')
+        .text('Verify these employees have been terminated in QuickBooks.', 40, doc.y);
+      doc.y += 14;
+      const tRows = terminations.map(t => ({
+        cells: [
+          { text: `${t.last_name}, ${t.first_name}`, bold: true },
+          { text: t.center },
+          { text: t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '' },
+          { text: t.termination_reason || '' },
+          { text: t.terminated_by || '' }
+        ]
+      }));
+      drawTable(['Name', 'Center', 'Last Day', 'Reason', 'Terminated By'],
+        tRows, [140, 100, 80, 130, 82]);
+    }
+
+    // --- SECTION 4: Hours by Center ---
+    const byCenter = {};
+    report.forEach(r => { if (!byCenter[r.center]) byCenter[r.center] = []; byCenter[r.center].push(r); });
+
+    for (const [ctr, emps] of Object.entries(byCenter)) {
+      sectionHeader(ctr);
+      emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
+      let ctrReg = 0, ctrOT = 0, ctrTotal = 0;
+      const hRows = emps.map(e => {
+        ctrReg += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
+        const hasOT = e.overtimeHours > 0;
+        const hasPTO = e.ptoDays > 0;
+        return {
+          _bg: hasPTO ? '#EBF4FF' : undefined,
+          cells: [
+            { text: `${e.last_name}, ${e.first_name}`, bold: true },
+            { text: e.regularHours.toFixed(2) },
+            { text: hasOT ? e.overtimeHours.toFixed(2) : '—', color: hasOT ? danger : gray },
+            { text: e.totalHours.toFixed(2), bold: true },
+            { text: hasPTO ? (e.ptoDays * 8).toFixed(2) : '—', color: hasPTO ? '#2471A3' : gray },
+            { text: e.unpaidDays > 0 ? e.unpaidDays + 'd' : '—' }
+          ]
+        };
+      });
+      // Totals row
+      hRows.push({
+        _bg: navy,
+        cells: [
+          { text: `TOTAL — ${ctr}`, bold: true, color: '#FFFFFF' },
+          { text: ctrReg.toFixed(2), color: '#FFFFFF', bold: true },
+          { text: ctrOT.toFixed(2), color: '#FFFFFF', bold: true },
+          { text: ctrTotal.toFixed(2), color: '#FFFFFF', bold: true },
+          { text: '', color: '#FFFFFF' },
+          { text: '', color: '#FFFFFF' }
+        ]
+      });
+      drawTable(['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Hrs', 'Unpaid'],
+        hRows, [160, 75, 75, 80, 75, 67],
+        { aligns: ['left', 'right', 'right', 'right', 'right', 'right'] });
+    }
+
+    // --- SECTION 5: W-4 Documents for New Hires ---
+    if (newHireW4s && newHireW4s.length > 0) {
+      for (const emp of newHireW4s) {
+        if (emp.w4Data && emp.w4Data.length > 0) {
+          doc.addPage();
+          doc.rect(0, 0, 612, 40).fill(navy);
+          doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
+            .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
+          doc.fill(gold).fontSize(9).font('Helvetica')
+            .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
+          try {
+            const imgBuffer = Buffer.from(emp.w4Data);
+            // Detect if it's an image by checking magic bytes
+            const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
+            const isPng = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
+            if (isJpeg || isPng) {
+              doc.image(imgBuffer, 40, 50, { fit: [pageW, 680], align: 'center' });
+            } else {
+              doc.fill(gray).fontSize(11).font('Helvetica')
+                .text('W-4 document attached (non-image format — see original file in Document Center)', 40, 60);
+            }
+          } catch(imgErr) {
+            doc.fill(gray).fontSize(11).font('Helvetica')
+              .text('W-4 document could not be rendered. See Document Center for the original file.', 40, 60);
+          }
+        }
+      }
+    }
+
+    // --- FOOTER on each page ---
+    const totalPages = doc.bufferedPageRange().count;
+    for (let i = 0; i < totalPages; i++) {
+      doc.switchToPage(i);
+      doc.fill(gray).fontSize(7).font('Helvetica')
+        .text(`TCC Payroll Report · ${pp.label} · Page ${i + 1} of ${totalPages}`, 40, 750, { align: 'center', width: pageW });
+    }
+
+    doc.end();
+  });
+}
+
+app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
+    const user = req.session.user;
+
+    // Reuse the payroll report data gathering logic
+    const empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY e.center, e.last_name, e.first_name`;
+    const empsResult = await pool.query(empQuery, [pp.start, pp.end]);
+    let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, user));
+
+    const report = [];
+    for (const emp of empRows) {
+      const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
+      const allDates = new Set();
+      sunSatWeeks.forEach(w => {
+        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
+          allDates.add(d.toISOString().split('T')[0]);
+      });
+      const allHours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`, [emp.id, [...allDates]]);
+      const hoursMap = {};
+      allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
+      let totalHours = 0;
+      const weekDetails = [];
+      for (const w of sunSatWeeks) {
+        let weekTotal = 0, weekInPeriod = 0;
+        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
+          const ds = d.toISOString().split('T')[0];
+          const h = hoursMap[ds] || 0;
+          weekTotal += h;
+          if (ds >= pp.start && ds <= pp.end) weekInPeriod += h;
+        }
+        const weekOT = Math.max(0, weekTotal - 40);
+        weekDetails.push({ ...w, weekTotal, weekOT, weekReg: weekTotal - weekOT, weekInPeriod });
+        totalHours += weekInPeriod;
+      }
+      let periodRegular = 0, periodOT = 0;
+      for (const w of weekDetails) {
+        if (w.weekTotal <= 40) { periodRegular += w.weekInPeriod; }
+        else { periodOT += Math.max(0, w.weekInPeriod - Math.max(0, 40 - (w.weekTotal - w.weekInPeriod))); periodRegular += w.weekInPeriod - Math.max(0, w.weekInPeriod - Math.max(0, 40 - (w.weekTotal - w.weekInPeriod))); }
+      }
+      const pto = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
+      const ptoDays = parseInt(pto.rows[0].count);
+      const unpaid = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
+      const unpaidDays = parseInt(unpaid.rows[0].count);
+      const increases = await pool.query(`SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`, [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']);
+      report.push({
+        id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
+        center: emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
+        is_full_time: emp.is_full_time, start_date: emp.start_date,
+        totalHours: Math.round(totalHours * 100) / 100,
+        regularHours: Math.round(periodRegular * 100) / 100,
+        overtimeHours: Math.round(periodOT * 100) / 100,
+        ptoDays, unpaidDays, payIncreases: increases.rows, weekDetails
+      });
+    }
+
+    // Terminations
+    const termResult = await pool.query(
+      `SELECT * FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL AND terminated_date >= $1 ORDER BY terminated_date DESC`, [pp.start]);
+    const terminations = termResult.rows.map(t => ({
+      id: t.id, first_name: t.first_name, last_name: t.last_name,
+      center: t.center, terminated_date: t.terminated_date,
+      termination_reason: t.termination_reason, terminated_by: t.terminated_by
+    }));
+
+    // New hire W-4 documents
+    const ppStartDate = new Date(pp.start + 'T12:00:00');
+    const ppEndDate = new Date(pp.end + 'T12:00:00');
+    const newHireW4s = [];
+    for (const emp of empRows) {
+      if (emp.start_date) {
+        const sd = new Date(emp.start_date);
+        if (sd >= ppStartDate && sd <= ppEndDate) {
+          // Fetch W-4 document
+          const w4 = await pool.query(
+            `SELECT file_data FROM documents WHERE employee_id = $1 AND doc_type = 'W-4' ORDER BY created_at DESC LIMIT 1`, [emp.id]);
+          newHireW4s.push({
+            id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
+            center: emp.center, position: emp.position, start_date: emp.start_date,
+            hourly_rate: emp.hourly_rate, hasW4: w4.rows.length > 0,
+            w4Data: w4.rows.length > 0 ? w4.rows[0].file_data : null
+          });
+        }
+      }
+    }
+
+    // Generate PDF
+    const pdfBuffer = await generatePayrollPDF(pp, report, terminations, newHireW4s);
+
+    // Auto-save to archive
+    await pool.query(
+      `INSERT INTO payroll_report_archives (period_start, period_end, pay_date, period_label, report_data, pdf_data, generated_by, generated_by_user_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       ON CONFLICT (period_start, period_end) DO UPDATE SET report_data = $5, pdf_data = $6, generated_by = $7, generated_by_user_id = $8, pay_date = $3, period_label = $4, created_at = NOW()`,
+      [pp.start, pp.end, pp.payDate, pp.label, JSON.stringify({ payPeriod: pp, report, terminations }), pdfBuffer, user.full_name, user.id]
+    );
+
+    // Send PDF
+    const filename = `TCC-Payroll-${pp.start}-to-${pp.end}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdfBuffer);
+  } catch (err) {
+    console.error('PDF generation error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ========================
+// PAYROLL REPORT ARCHIVES
 // ========================
 app.get('/api/payroll-archives', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const result = await pool.query(
-      `SELECT id, period_start, period_end, pay_date, period_label, generated_by, notes, created_at FROM payroll_report_archives ORDER BY period_start DESC`
+      `SELECT id, period_start, period_end, pay_date, period_label, generated_by, notes, created_at,
+       (pdf_data IS NOT NULL) as has_pdf
+       FROM payroll_report_archives ORDER BY period_start DESC`
     );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1312,9 +1652,24 @@ app.get('/api/payroll-archives', requireRole('owner', 'payroll'), async (req, re
 
 app.get('/api/payroll-archives/:id', requireRole('owner', 'payroll'), async (req, res) => {
   try {
-    const result = await pool.query('SELECT * FROM payroll_report_archives WHERE id = $1', [req.params.id]);
+    const result = await pool.query(
+      'SELECT id, period_start, period_end, pay_date, period_label, report_data, generated_by, notes, created_at, (pdf_data IS NOT NULL) as has_pdf FROM payroll_report_archives WHERE id = $1',
+      [req.params.id]);
     if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
     res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+app.get('/api/payroll-archives/:id/pdf', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const result = await pool.query('SELECT pdf_data, period_label, period_start, period_end FROM payroll_report_archives WHERE id = $1', [req.params.id]);
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (!result.rows[0].pdf_data) return res.status(404).json({ error: 'No PDF stored for this archive' });
+    const row = result.rows[0];
+    const filename = `TCC-Payroll-${row.period_start}-to-${row.period_end}.pdf`;
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(row.pdf_data);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
