@@ -1695,7 +1695,8 @@ async function renderPayrollWorkflow() {
 function showTimecardUpload(center, start, end) {
   let html = `<div class="modal-header"><h3>Upload Timecards — ${center}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
-      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">Upload Playground export CSV for ${center}.</p>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:8px">Upload Playground export CSV for ${center}.</p>
+      <p style="font-size:12px;color:var(--gray-400);margin-bottom:16px">Payable hours = Billable hours minus break time (lunch is unpaid).</p>
       <div class="form-group"><input type="file" id="timecardFile" accept=".csv"></div>
       <div id="timecardPreview"></div>
     </div>
@@ -1713,13 +1714,59 @@ async function doTimecardUpload() {
   try {
     const result = await fetch('/api/import-timecard', { method: 'POST', body: formData, credentials: 'include' }).then(r => r.json());
     if (result.error) throw new Error(result.error);
-    let previewHtml = `<div style="margin-top:16px;padding:16px;background:var(--success-bg);border-radius:var(--radius)">
+    let previewHtml = '';
+
+    // ---- UNMATCHED NAMES WARNING (prominent) ----
+    if (result.unmatchedNames.length > 0) {
+      previewHtml += `<div style="margin-top:16px;padding:16px;background:var(--danger-bg);border:2px solid var(--danger);border-radius:var(--radius)">
+        <div style="font-size:15px;font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ ${result.unmatchedNames.length} Name(s) Not Found in Roster</div>
+        <p style="font-size:13px;color:var(--navy);margin-bottom:12px">The following names from the Playground CSV do not match any active employee on the roster. Their hours were <strong>NOT imported</strong>.</p>
+        <div style="margin-bottom:12px">
+          ${result.unmatchedNames.map(n => `<div style="padding:6px 12px;background:white;border-radius:6px;margin-bottom:4px;font-weight:600;display:flex;align-items:center;gap:8px">
+            <span style="color:var(--danger)">✕</span> ${n}
+          </div>`).join('')}
+        </div>
+        <div style="font-size:13px;color:var(--navy);padding:12px;background:white;border-radius:6px;border-left:4px solid var(--warning)">
+          <strong>What to do:</strong>
+          <div style="margin-top:6px">1. <strong>Check with Amy (HR)</strong> — Has this person been terminated? If they still work here, they may need to be <strong>reinstated</strong> in this app before payroll can be processed.</div>
+          <div style="margin-top:4px">2. <strong>Check the name spelling</strong> — The first and last name in the <strong>Playground app must match the roster name</strong> in Payroll Hub exactly. If someone goes by a nickname or has a different spelling in Playground, the roster name or Playground name needs to be updated to match.</div>
+          <div style="margin-top:4px">3. Once resolved, <strong>re-upload the CSV</strong> to capture their hours.</div>
+        </div>
+      </div>`;
+    }
+
+    // ---- SUCCESS SUMMARY ----
+    previewHtml += `<div style="margin-top:16px;padding:16px;background:var(--success-bg);border-radius:var(--radius)">
       <strong>Import Results</strong><br>
-      Rows: ${result.imported} · Matched: ${result.matched} · Saved: ${result.savedDays} days
-      ${result.unmatchedNames.length > 0 ? `<div style="margin-top:8px;color:var(--warning)">Unmatched: ${result.unmatchedNames.join(', ')}</div>` : ''}
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-top:8px;font-size:13px">
+        <div>Rows processed: <strong>${result.imported}</strong></div>
+        <div>Matched to roster: <strong>${result.matched}</strong></div>
+        <div>Days saved: <strong>${result.savedDays}</strong></div>
+      </div>
+      ${result.totalBreaksDeducted > 0 ? `<div style="margin-top:8px;font-size:13px;color:var(--navy)">
+        🍽️ <strong>${result.totalBreaksDeducted.toFixed(1)} total break hours</strong> deducted across all employees (lunch time is unpaid).
+      </div>` : ''}
     </div>`;
+
+    // ---- PREVIEW TABLE (show billable, breaks, and net hours) ----
+    if (result.preview && result.preview.length > 0) {
+      previewHtml += `<div style="margin-top:16px;max-height:300px;overflow-y:auto">
+        <table class="data-table" style="font-size:11px">
+          <thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Breaks</th><th style="font-weight:700">Payable Hrs</th></tr></thead><tbody>`;
+      result.preview.forEach(r => {
+        const hasBreak = parseFloat(r.breakHours) > 0;
+        previewHtml += `<tr>
+          <td>${r.name}</td><td>${r.date}</td>
+          <td>${r.billable}</td>
+          <td style="${hasBreak ? 'color:var(--warning);font-weight:600' : ''}">${r.breaks || '—'}</td>
+          <td style="font-weight:700">${r.hours}</td>
+        </tr>`;
+      });
+      previewHtml += `</tbody></table></div>`;
+    }
+
     document.getElementById('timecardPreview').innerHTML = previewHtml;
-    showToast('Timecards imported');
+    showToast(result.unmatchedNames.length > 0 ? 'Imported with warnings — check unmatched names' : 'Timecards imported', result.unmatchedNames.length > 0 ? 'warning' : 'success');
   } catch(e) { alert('Error: ' + e.message); }
 }
 
