@@ -1213,12 +1213,16 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     function fd(d) { if (!d) return ''; const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d); const m = s.match(/(\d{4})-(\d{2})-(\d{2})/); return m ? parseInt(m[2])+'/'+parseInt(m[3])+'/'+m[1].slice(2) : ''; }
     const classrooms = {};
     rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
-    const skipSections = ['Admin / Office / Food Prep'];
-    const bottomSections = ['Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
-    const allClassrooms = Object.keys(classrooms);
-    const topClassrooms = allClassrooms.filter(c => !bottomSections.includes(c) && !skipSections.includes(c));
-    const btmClassrooms = bottomSections.filter(c => allClassrooms.includes(c));
-    const orderedClassrooms = [...topClassrooms, ...btmClassrooms];
+    
+    // Use center-specific template to determine which classrooms to show and their order
+    const peaceTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','Dinos (GSRP)','Penguins (GSRP)','School-Agers'];
+    const nilesTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','GSRP-1','GSRP-2','Strong Beginnings','School-Agers'];
+    const montessoriTemplate = ['GSRP Orange','GSRP Blue','GSRP Pink'];
+    const centerRooms = center === 'Niles' ? nilesTemplate : center === 'Montessori' ? montessoriTemplate : peaceTemplate;
+    const bottomSections = ['Admin / Office / Food Prep', 'Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
+    
+    // Only show template classrooms + bottom sections, in order
+    const orderedClassrooms = [...centerRooms, ...bottomSections].filter(c => classrooms[c] && classrooms[c].length > 0 || bottomSections.includes(c) || centerRooms.includes(c));
     let tableRows = '';
     for (const cls of orderedClassrooms) {
       const staff = classrooms[cls] || [];
