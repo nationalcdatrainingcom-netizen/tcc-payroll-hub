@@ -967,25 +967,53 @@ async function renderStaffingPlan() {
   });
   
   const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
-  const orderedClassrooms = template.map(t => t.section);
+  const templateSections = template.map(t => t.section);
+  
+  // Only show classrooms that belong to this center's template
+  // Staff in non-template classrooms go to unassigned list
+  const nonTemplateStaff = [];
   Object.keys(classroomMap).forEach(c => {
-    if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
+    if (!templateSections.includes(c)) {
+      // These staff are in classrooms that don't belong to this center
+      classroomMap[c].forEach(s => {
+        // Only flag regular staff (not subs/externals which go in their own sections)
+        if ((s.entry_type || 'staff') === 'staff') {
+          nonTemplateStaff.push(s);
+        }
+      });
+    }
   });
+  
+  // Use only the template ordering — no extra classrooms appended
+  const orderedClassrooms = [...templateSections];
   
   window._spCenter = center;
   window._spClassrooms = orderedClassrooms;
   
   // ---- UNASSIGNED STAFF SECTION ----
-  if (canEdit && unassigned.length > 0) {
+  // Include staff not on staffing plan AND staff assigned to classrooms that don't belong to this center
+  const allNeedAssignment = [...unassigned];
+  // Add non-template staff (in wrong classroom) with their current wrong classroom noted
+  const wrongClassroomStaff = nonTemplateStaff.filter(s => s.employee_id && !unassigned.find(u => u.id === s.employee_id));
+  
+  if (canEdit && (allNeedAssignment.length > 0 || wrongClassroomStaff.length > 0)) {
+    const totalCount = allNeedAssignment.length + wrongClassroomStaff.length;
     html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
-      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3></div>
+      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${totalCount})</h3></div>
       <div class="card-body">
       <div style="display:flex;flex-wrap:wrap;gap:8px">`;
-    unassigned.forEach(e => {
+    allNeedAssignment.forEach(e => {
       html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600">
         👤 ${e.last_name}, ${e.first_name}
         <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
         <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
+      </div>`;
+    });
+    wrongClassroomStaff.forEach(s => {
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--danger-bg);border:1.5px solid var(--danger);border-radius:20px;font-size:12px;font-weight:600">
+        👤 ${s.first_name} ${s.last_name}
+        <span style="font-size:10px;color:var(--danger)">Wrong classroom: "${s.classroom}"</span>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="moveStaffEntry(${s.id},'${(s.first_name||'')} ${(s.last_name||'')}')">Reassign →</button>
       </div>`;
     });
     html += `</div></div></div>`;
