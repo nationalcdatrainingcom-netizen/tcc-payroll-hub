@@ -808,14 +808,22 @@ app.get('/api/documents/:id/download', requireAuth, async (req, res) => {
 });
 
 // Parse "X hrs Y min" to decimal hours
-function parseBillableHours(str) {
+function parseHoursMinutes(str) {
   if (!str) return 0;
   const m = str.match(/(\d+)\s*hrs?\s*(\d+)\s*min/i);
   if (m) return parseInt(m[1]) + parseInt(m[2]) / 60;
+  // Also handle plain "X min" (no hours)
+  const minOnly = str.match(/(\d+)\s*min/i);
+  if (minOnly) return parseInt(minOnly[1]) / 60;
+  // Also handle plain "X hrs" (no minutes)
+  const hrsOnly = str.match(/(\d+)\s*hrs?/i);
+  if (hrsOnly) return parseInt(hrsOnly[1]);
   return 0;
 }
+// Backwards-compatible alias
+function parseBillableHours(str) { return parseHoursMinutes(str); }
 
-// CSV Timecard import
+// CSV Timecard import — hours = Billable MINUS Breaks (lunch is unpaid)
 app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), upload.single('file'), async (req, res) => {
   try {
     const results = [];
@@ -833,6 +841,7 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     });
     fs.unlinkSync(req.file.path);
     let matched = 0, unmatched = 0, totalRows = 0;
+    let totalBreaksDeducted = 0;
     const unmatchedNames = new Set();
     const dailySummary = {};
     for (const row of results) {
@@ -840,9 +849,14 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       const firstName = (row['First Name'] || '').trim();
       const dateStr = (row['Date'] || '').trim();
       const billable = (row['Billable'] || '').trim();
+      const breaks = (row['Breaks'] || '').trim();
       if (!lastName || !dateStr) continue;
       totalRows++;
-      const hours = parseBillableHours(billable);
+      // Payable hours = Billable - Breaks (lunch is unpaid)
+      const billableHours = parseHoursMinutes(billable);
+      const breakHours = parseHoursMinutes(breaks);
+      const hours = Math.max(0, billableHours - breakHours);
+      if (breakHours > 0) totalBreaksDeducted += breakHours;
       const dateParts = dateStr.split('/');
       if (dateParts.length !== 3) continue;
       const isoDate = `${dateParts[2]}-${dateParts[0].padStart(2,'0')}-${dateParts[1].padStart(2,'0')}`;
@@ -865,13 +879,23 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
         [parseInt(eid), dt, Math.round(hours * 100) / 100]);
       savedDays++;
     }
-    const preview = results.slice(0, 40).map(r => ({
-      name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
-      date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
-      breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
-      hours: parseBillableHours((r['Billable']||'').trim()).toFixed(2)
-    }));
-    res.json({ imported: totalRows, matched, unmatched, unmatchedNames: [...unmatchedNames], savedDays, preview, payPeriod: getPayPeriod(new Date()) });
+    const preview = results.slice(0, 40).map(r => {
+      const b = parseHoursMinutes((r['Billable']||'').trim());
+      const br = parseHoursMinutes((r['Breaks']||'').trim());
+      return {
+        name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
+        date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
+        breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
+        billableHours: b.toFixed(2), breakHours: br.toFixed(2),
+        hours: Math.max(0, b - br).toFixed(2)
+      };
+    });
+    res.json({
+      imported: totalRows, matched, unmatched,
+      unmatchedNames: [...unmatchedNames], savedDays, preview,
+      totalBreaksDeducted: Math.round(totalBreaksDeducted * 100) / 100,
+      payPeriod: getPayPeriod(new Date())
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
