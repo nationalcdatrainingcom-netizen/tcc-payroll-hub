@@ -241,7 +241,7 @@ async function initDB() {
     )
   `);
 
-  // NEW: Payroll report archives table
+  // Payroll report archives table
   await pool.query(`
     CREATE TABLE IF NOT EXISTS payroll_report_archives (
       id SERIAL PRIMARY KEY,
@@ -258,8 +258,19 @@ async function initDB() {
       UNIQUE(period_start, period_end)
     )
   `);
-  // Migration: add pdf_data column if table already exists without it
   await pool.query(`ALTER TABLE payroll_report_archives ADD COLUMN IF NOT EXISTS pdf_data BYTEA`);
+
+  // ─── NEW: Staffing plan migrations for cross-center subs & external persons ───
+  // external_name: for therapists/volunteers not on the employee roster (employee_id will be NULL)
+  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS external_name VARCHAR(200)`);
+  // source_center: when set, indicates this is a cross-center sub reference (live lookup from home center)
+  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS source_center VARCHAR(100)`);
+  // source_employee_id: the employee_id to look up compliance from at the source center
+  // (same as employee_id, but makes intent clear; we use employee_id for the FK)
+  // external_start_date: start date for volunteers/therapists (not linked to employee record)
+  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS external_start_date DATE`);
+  // entry_type: 'staff' (default), 'sub' (cross-center), 'external' (therapist/volunteer)
+  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20) DEFAULT 'staff'`);
 
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
@@ -894,40 +905,29 @@ app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// ========================
-// NEW: OVERTIME VIEW (all employees, cross-period boundary)
-// ========================
+// Overtime View (all employees)
 app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) => {
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const centerFilter = req.query.center || null;
     const weeks = getMonToSunWeeks(pp.start, pp.end);
-
-    // Collect all dates across all weeks (including boundary days outside the pay period)
     const allDates = [];
     weeks.forEach(w => {
       for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
         allDates.push(d.toISOString().split('T')[0]);
     });
     if (allDates.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
-
-    // Get all active employees (optionally filtered by center)
     let empQuery = 'SELECT id, first_name, last_name, center, position FROM employees WHERE is_active = TRUE';
     let empParams = [];
     if (centerFilter) { empQuery += ' AND center = $1'; empParams.push(centerFilter); }
     empQuery += ' ORDER BY center, last_name, first_name';
     const empsResult = await pool.query(empQuery, empParams);
-
-    // Batch load ALL daily_hours for these dates for ALL employees in one query
     const empIds = empsResult.rows.map(e => e.id);
     if (empIds.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
-
     const hoursResult = await pool.query(
       `SELECT employee_id, work_date, hours_worked FROM daily_hours WHERE employee_id = ANY($1) AND work_date = ANY($2)`,
       [empIds, allDates]
     );
-
-    // Build hours lookup: { empId: { date: hours } }
     const hoursLookup = {};
     hoursResult.rows.forEach(h => {
       const eid = h.employee_id;
@@ -935,18 +935,13 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
       if (!hoursLookup[eid]) hoursLookup[eid] = {};
       hoursLookup[eid][ds] = parseFloat(h.hours_worked);
     });
-
-    // Build per-employee overtime data
     const employeeData = [];
     for (const emp of empsResult.rows) {
       const empHours = hoursLookup[emp.id] || {};
-      let totalInPeriod = 0;
-      let totalOT = 0;
+      let totalInPeriod = 0, totalOT = 0;
       const weekBreakdown = [];
-
       for (const w of weeks) {
-        let weekTotal = 0;
-        let weekInPeriod = 0;
+        let weekTotal = 0, weekInPeriod = 0;
         const days = [];
         for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
           const ds = d.toISOString().split('T')[0];
@@ -959,44 +954,81 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
         const weekOT = Math.max(0, weekTotal - 40);
         totalInPeriod += weekInPeriod;
         totalOT += weekOT;
-        weekBreakdown.push({
-          monday: w.monday, sunday: w.sunday, days,
-          weekTotal, weekInPeriod,
-          regularHours: Math.min(weekTotal, 40),
-          overtimeHours: weekOT
-        });
+        weekBreakdown.push({ monday: w.monday, sunday: w.sunday, days, weekTotal, weekInPeriod, regularHours: Math.min(weekTotal, 40), overtimeHours: weekOT });
       }
-
-      // Only include employees who have any hours in the period or its boundary weeks
       const hasAnyHours = Object.keys(empHours).length > 0;
-
       employeeData.push({
         id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.center, position: emp.position,
-        weeks: weekBreakdown,
+        center: emp.center, position: emp.position, weeks: weekBreakdown,
         inPeriodHours: Math.round(totalInPeriod * 100) / 100,
-        totalOT: Math.round(totalOT * 100) / 100,
-        hasOT: totalOT > 0,
-        hasHours: hasAnyHours
+        totalOT: Math.round(totalOT * 100) / 100, hasOT: totalOT > 0, hasHours: hasAnyHours
       });
     }
-
     res.json({ employees: employeeData, payPeriod: pp, weeks });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Staffing plan
+// ========================
+// STAFFING PLAN
+// ========================
 app.get('/api/staffing-plan', requireAuth, async (req, res) => {
   try {
     const user = req.session.user;
-    let query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id ORDER BY sp.center, sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
+    let query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
+      FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
+      ORDER BY sp.center, sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
     let params = [];
     if (user.role === 'director') {
-      query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id WHERE sp.center = $1 ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
+      query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
+        FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
+        WHERE sp.center = $1
+        ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
       params = [user.center];
     }
     const result = await pool.query(query, params);
-    res.json(result.rows);
+
+    // For cross-center subs (entry_type='sub'), do live lookup of compliance from home center
+    const enriched = [];
+    for (const row of result.rows) {
+      if (row.entry_type === 'sub' && row.source_center && row.employee_id) {
+        // Live lookup: find the home center staffing_plan entry for this employee
+        const homeEntry = await pool.query(
+          `SELECT orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher,
+                  ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement,
+                  last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training
+           FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND (entry_type IS NULL OR entry_type = 'staff') LIMIT 1`,
+          [row.employee_id, row.source_center]
+        );
+        if (homeEntry.rows.length > 0) {
+          const h = homeEntry.rows[0];
+          // Overlay home center compliance data onto the sub entry
+          row.orientation_date = h.orientation_date;
+          row.cpr_first_aid_date = h.cpr_first_aid_date;
+          row.health_safety_abc_date = h.health_safety_abc_date;
+          row.health_safety_refresher = h.health_safety_refresher;
+          row.ccbc_consent_date = h.ccbc_consent_date;
+          row.fingerprinting_date = h.fingerprinting_date;
+          row.date_eligible = h.date_eligible;
+          row.abuse_neglect_statement = h.abuse_neglect_statement;
+          row.last_evaluation = h.last_evaluation;
+          row.date_promoted_lead = h.date_promoted_lead;
+          row.date_assigned_room = h.date_assigned_room;
+          row.education = h.education;
+          row.semester_hours = h.semester_hours;
+          row.infant_toddler_training = h.infant_toddler_training;
+        }
+      }
+      // For external entries, use external_name as first_name/last_name
+      if (row.entry_type === 'external' && !row.employee_id && row.external_name) {
+        const parts = row.external_name.split(' ');
+        row.first_name = parts[0] || '';
+        row.last_name = parts.slice(1).join(' ') || '';
+        row.emp_start_date = row.external_start_date;
+      }
+      enriched.push(row);
+    }
+
+    res.json(enriched);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1004,10 +1036,10 @@ app.post('/api/staffing-plan', requireRole('owner', 'hr', 'director'), async (re
   try {
     const d = req.body;
     const result = await pool.query(
-      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher, ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement, last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) RETURNING *`,
-      [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training]);
-    if (d.employee_id) await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
+      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher, ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement, last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training, external_name, source_center, external_start_date, entry_type)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
+      [d.employee_id || null, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, d.external_name || null, d.source_center || null, d.external_start_date || null, d.entry_type || 'staff']);
+    if (d.employee_id && d.entry_type !== 'sub') await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1016,9 +1048,9 @@ app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async 
   try {
     const d = req.body;
     const result = await pool.query(
-      `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18 WHERE id=$19 RETURNING *`,
-      [d.employee_id, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, req.params.id]);
-    if (d.employee_id) await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
+      `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18, external_name=$19, source_center=$20, external_start_date=$21, entry_type=$22 WHERE id=$23 RETURNING *`,
+      [d.employee_id || null, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, d.external_name || null, d.source_center || null, d.external_start_date || null, d.entry_type || 'staff', req.params.id]);
+    if (d.employee_id && d.entry_type !== 'sub') await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1030,15 +1062,126 @@ app.delete('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), asy
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Printable staffing plan
+// ─── NEW: Get employees from OTHER centers for cross-center sub pull ─────────
+app.get('/api/staffing-plan/available-subs/:center', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
+  try {
+    const targetCenter = decodeURIComponent(req.params.center);
+    // Get all active employees NOT from the target center
+    const emps = await pool.query(
+      `SELECT e.id, e.first_name, e.last_name, e.center, e.position, e.start_date, e.scheduled_times,
+              e.classroom
+       FROM employees e
+       WHERE e.is_active = TRUE AND e.center != $1
+       ORDER BY e.center, e.last_name, e.first_name`,
+      [targetCenter]
+    );
+
+    // Check which ones already have a sub entry at the target center
+    const existingSubs = await pool.query(
+      `SELECT employee_id FROM staffing_plan WHERE center = $1 AND entry_type = 'sub'`,
+      [targetCenter]
+    );
+    const existingIds = new Set(existingSubs.rows.map(r => r.employee_id));
+
+    const available = emps.rows.map(e => ({
+      ...e,
+      already_added: existingIds.has(e.id)
+    }));
+
+    res.json(available);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── NEW: Pull a sub from another center (creates sub entry with live lookup) ──
+app.post('/api/staffing-plan/pull-sub', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
+  try {
+    const { employee_id, target_center, classroom } = req.body;
+
+    // Get the employee's home center
+    const emp = await pool.query('SELECT id, first_name, last_name, center FROM employees WHERE id = $1', [employee_id]);
+    if (emp.rows.length === 0) return res.status(404).json({ error: 'Employee not found' });
+    const homeCenter = emp.rows[0].center;
+
+    if (homeCenter === target_center) return res.status(400).json({ error: 'Employee already belongs to this center' });
+
+    // Check if already added as sub at target center
+    const existing = await pool.query(
+      `SELECT id FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND entry_type = 'sub'`,
+      [employee_id, target_center]
+    );
+    if (existing.rows.length > 0) return res.status(400).json({ error: 'Employee is already listed as a sub at this center' });
+
+    // Create sub entry — compliance dates will be looked up live from home center
+    const result = await pool.query(
+      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, source_center, entry_type)
+       VALUES ($1, $2, $3, 'Sub', $4, 'sub') RETURNING *`,
+      [employee_id, target_center, classroom || 'Subs from other centers', homeCenter]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── NEW: Add external person (therapist/volunteer) ──────────────────────────
+app.post('/api/staffing-plan/add-external', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
+  try {
+    const { external_name, center, classroom, role_in_room, fingerprinting_date, date_eligible, abuse_neglect_statement, external_start_date } = req.body;
+
+    if (!external_name || !external_name.trim()) return res.status(400).json({ error: 'Name is required' });
+
+    const result = await pool.query(
+      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, external_name, entry_type,
+       fingerprinting_date, date_eligible, abuse_neglect_statement, external_start_date)
+       VALUES (NULL, $1, $2, $3, $4, 'external', $5, $6, $7, $8) RETURNING *`,
+      [center, classroom, role_in_room || '', external_name.trim(), fingerprinting_date || null, date_eligible || null, abuse_neglect_statement || null, external_start_date || null]
+    );
+
+    res.json(result.rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ─── UPDATE: Printable staffing plan — handle subs (live lookup) and externals ──
 app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
   try {
     const center = decodeURIComponent(req.params.center);
     const spData = await pool.query(
-      `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id WHERE sp.center = $1 ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`,
+      `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
+       FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
+       WHERE sp.center = $1
+       ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`,
       [center]);
+
+    // Enrich sub entries with live compliance data
+    for (const row of spData.rows) {
+      if (row.entry_type === 'sub' && row.source_center && row.employee_id) {
+        const homeEntry = await pool.query(
+          `SELECT orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher,
+                  ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement,
+                  last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training
+           FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND (entry_type IS NULL OR entry_type = 'staff') LIMIT 1`,
+          [row.employee_id, row.source_center]
+        );
+        if (homeEntry.rows.length > 0) {
+          const h = homeEntry.rows[0];
+          Object.assign(row, h);
+        }
+      }
+      if (row.entry_type === 'external' && !row.employee_id && row.external_name) {
+        const parts = row.external_name.split(' ');
+        row.first_name = parts[0] || '';
+        row.last_name = parts.slice(1).join(' ') || '';
+        row.emp_start_date = row.external_start_date;
+      }
+    }
+
     const seen = new Set();
-    const rows = spData.rows.filter(r => { if (seen.has(r.employee_id)) return false; seen.add(r.employee_id); return true; });
+    const rows = spData.rows.filter(r => {
+      // For externals, use id as key (no employee_id)
+      const key = r.employee_id ? `emp-${r.employee_id}-${r.entry_type || 'staff'}` : `sp-${r.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
     const sig = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
     const sigData = sig.rows[0];
     const licenseNum = center === 'Montessori' ? 'DC110278344' : 'DC110415511';
@@ -1057,7 +1200,10 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
       const staff = classrooms[cls] || [];
       tableRows += `<tr class="section"><td colspan="19">${cls}</td></tr>`;
       staff.forEach(s => {
-        tableRows += `<tr><td>${s.role_in_room||''}</td><td class="name">${(s.first_name||'')+' '+(s.last_name||'')}</td><td>${fd(s.emp_start_date)}</td><td>${s.emp_schedule||''}</td><td>${fd(s.orientation_date)}</td><td>${fd(s.cpr_first_aid_date)}</td><td>${fd(s.health_safety_abc_date)}</td><td>${fd(s.health_safety_refresher)}</td><td>${fd(s.ccbc_consent_date)}</td><td>${fd(s.fingerprinting_date)}</td><td>${fd(s.date_eligible)}</td><td>${fd(s.abuse_neglect_statement)}</td><td>${fd(s.last_evaluation)}</td><td>${fd(s.date_promoted_lead)}</td><td>${fd(s.date_assigned_room)}</td><td>${s.education||''}</td><td>${s.semester_hours||''}</td><td>${s.infant_toddler_training||''}</td></tr>`;
+        const nameDisplay = (s.first_name||'')+' '+(s.last_name||'');
+        const homeTag = s.entry_type === 'sub' && s.source_center ? ` <span style="font-size:5pt;color:#888">(${s.source_center})</span>` : '';
+        const extTag = s.entry_type === 'external' ? ` <span style="font-size:5pt;color:#888">(ext)</span>` : '';
+        tableRows += `<tr><td>${s.role_in_room||''}</td><td class="name">${nameDisplay}${homeTag}${extTag}</td><td>${fd(s.emp_start_date)}</td><td>${s.emp_schedule||''}</td><td>${fd(s.orientation_date)}</td><td>${fd(s.cpr_first_aid_date)}</td><td>${fd(s.health_safety_abc_date)}</td><td>${fd(s.health_safety_refresher)}</td><td>${fd(s.ccbc_consent_date)}</td><td>${fd(s.fingerprinting_date)}</td><td>${fd(s.date_eligible)}</td><td>${fd(s.abuse_neglect_statement)}</td><td>${fd(s.last_evaluation)}</td><td>${fd(s.date_promoted_lead)}</td><td>${fd(s.date_assigned_room)}</td><td>${s.education||''}</td><td>${s.semester_hours||''}</td><td>${s.infant_toddler_training||''}</td></tr>`;
       });
     }
     const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Staffing Plan — ${centerFull}</title><style>@page{size:landscape;margin:0.3in}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;font-size:7pt;color:#1B2A4A}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #C8963E}.header h1{font-size:11pt;font-weight:700}.header .sub{font-size:7pt;color:#666}.header .sig{text-align:right}.header .sig img{height:25px}table{width:100%;border-collapse:collapse;font-size:6.5pt}th{background:#1B2A4A;color:white;padding:2px 3px;text-align:left;font-weight:600;font-size:6pt;white-space:nowrap}td{padding:2px 3px;border-bottom:0.5px solid #ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}td.name{font-weight:600;max-width:100px}tr.section td{background:#1B2A4A;color:white;font-weight:700;font-size:7pt;padding:3px 5px}tr:nth-child(even):not(.section){background:#f8f9fa}.resp-row{font-size:5.5pt;color:#888;margin-bottom:2px}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body><div class="header"><div><h1>Staffing Plan</h1><div class="sub">${centerFull} · License #${licenseNum}</div><div class="sub">All Staff and Unsupervised Volunteers · ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</div></div><div class="sig"><div class="sub">Mary Wardlaw, Licensee</div>${sigData?.value ? `<img src="${sigData.value}"><div class="sub">${new Date(sigData.updated_at).toLocaleDateString()}</div>` : ''}</div></div><div class="resp-row">Responsible: Program Director completes Name, Start Date, Schedule, Evaluations, Promoted, Room Assigned · Amy (Dir. Professional Development) completes Orientation, CPR, H&S, CCBC, Fingerprint, Eligible, Abuse/Neglect, Education, Hours, I/T Training</div><table><thead><tr><th>Role</th><th>Name</th><th>Start</th><th>Schedule</th><th>Orient.</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Ref.</th><th>CCBC</th><th>Fingerpr.</th><th>Eligible</th><th>Abuse/Neg.</th><th>Last Eval</th><th>Promoted</th><th>Room Asgn</th><th>Education</th><th>Hrs/CEUs</th><th>I/T Training</th></tr></thead><tbody>${tableRows}</tbody></table><div style="margin-top:12px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #ccc;padding-top:8px"><div style="flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Licensee Signature:</div>${sigData?.value ? '<img src="' + sigData.value + '" style="height:30px;margin-bottom:2px"><br><span style="font-size:6pt;color:#999">Digital signature on file</span>' : '<div style="border-bottom:1px solid #333;width:250px;height:25px;margin-bottom:2px"></div><span style="font-size:6pt;color:#999">Sign here</span>'}</div><div style="text-align:center;flex:1"><div style="font-size:7pt;font-weight:600">Mary Wardlaw, Licensee</div></div><div style="text-align:right;flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Date:</div>${sigData?.value ? '<span style="font-size:8pt">' + new Date(sigData.updated_at).toLocaleDateString() + '</span>' : '<div style="border-bottom:1px solid #333;width:150px;height:20px;display:inline-block"></div>'}</div></div><script>window.onload=function(){window.print()}</script></body></html>`;
@@ -1214,8 +1360,6 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const center = req.query.center;
-
-    // Include terminated employees who have hours in this period
     let empQuery, empParams;
     if (center) {
       empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $2 AND dh.work_date <= $3)) AND e.center = $1 ORDER BY e.center, e.last_name, e.first_name`;
@@ -1226,7 +1370,6 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     }
     const empsResult = await pool.query(empQuery, empParams);
     let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, req.session.user));
-
     const report = [];
     for (const emp of empRows) {
       const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
@@ -1284,8 +1427,6 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         ptoDays, unpaidDays, payIncreases: increases.rows, weekDetails
       });
     }
-
-    // Terminations: recently terminated employees (within last 2 pay periods)
     const termResult = await pool.query(
       `SELECT * FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL AND terminated_date >= $1 ORDER BY terminated_date DESC`,
       [pp.start]
@@ -1294,10 +1435,8 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
       id: t.id, first_name: t.first_name, last_name: t.last_name,
       center: t.center, position: t.position,
       terminated_date: t.terminated_date, termination_reason: t.termination_reason,
-      terminated_by: t.terminated_by,
-      termination_payroll_count: 0
+      terminated_by: t.terminated_by, termination_payroll_count: 0
     }));
-
     res.json({ payPeriod: pp, report, terminations });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1312,37 +1451,27 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
     doc.on('data', c => chunks.push(c));
     doc.on('end', () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
-
     const navy = '#1B2A4A';
     const gold = '#C8963E';
     const gray = '#5A6270';
     const lightGray = '#F0F2F5';
     const danger = '#C0392B';
     const success = '#2E7D4F';
-    const pageW = 612 - 80; // letter width minus margins
-
-    // --- HEADER ---
+    const pageW = 612 - 80;
     doc.rect(0, 0, 612, 70).fill(navy);
     doc.fill('#FFFFFF').fontSize(18).font('Helvetica-Bold').text('TCC Payroll Report', 40, 20);
     doc.fontSize(11).font('Helvetica').text(`Pay Period: ${pp.label}`, 40, 42);
     doc.text(`Pay Date: ${new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', year:'numeric'})}`, 40, 55, { continued: false });
     doc.fill(gold).fontSize(9).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 172 });
     doc.text('The Children\'s Center', 400, 38, { align: 'right', width: 172 });
-
     doc.y = 85;
-
-    // Helper: draw a table
     function drawTable(headers, rows, colWidths, opts = {}) {
       const startY = doc.y;
       const rowH = 18;
       const headerH = 22;
       let y = startY;
-
-      // Check page break
       const neededH = headerH + (rows.length * rowH) + 10;
       if (y + neededH > 720) { doc.addPage(); y = 40; }
-
-      // Header row
       doc.rect(40, y, pageW, headerH).fill(navy);
       let x = 40;
       headers.forEach((h, i) => {
@@ -1351,8 +1480,6 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
         x += colWidths[i];
       });
       y += headerH;
-
-      // Data rows
       rows.forEach((row, ri) => {
         if (y + rowH > 730) { doc.addPage(); y = 40; }
         const bg = row._bg || (ri % 2 === 0 ? '#FFFFFF' : lightGray);
@@ -1369,8 +1496,6 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
       });
       doc.y = y + 6;
     }
-
-    // Helper: section header
     function sectionHeader(title, color) {
       if (doc.y > 680) doc.addPage();
       doc.y += 8;
@@ -1379,8 +1504,6 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
       doc.fill(color || navy).fontSize(13).font('Helvetica-Bold').text(title, 40, doc.y);
       doc.y += 20;
     }
-
-    // --- SECTION 1: Pay Increases ---
     const allIncreases = [];
     report.forEach(e => {
       if (e.payIncreases && e.payIncreases.length > 0) {
@@ -1398,19 +1521,8 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
           { text: pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : '' }
         ]
       }));
-      drawTable(['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'],
-        piRows, [160, 110, 90, 90, 82]);
+      drawTable(['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'], piRows, [160, 110, 90, 90, 82]);
     }
-
-    // --- SECTION 2: New Employees ---
-    const ppStart = new Date(pp.start + 'T12:00:00');
-    const ppEnd = new Date(pp.end + 'T12:00:00');
-    const newEmps = report.filter(e => {
-      if (!e.start_date) return false;
-      const sd = new Date(e.start_date);
-      return sd >= ppStart && sd <= ppEnd;
-    });
-    // Also check from the full employee data passed in
     if (newHireW4s && newHireW4s.length > 0) {
       sectionHeader('New Employees This Period');
       const neRows = newHireW4s.map(e => ({
@@ -1423,11 +1535,8 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
           { text: e.hasW4 ? 'See attached' : 'Missing' }
         ]
       }));
-      drawTable(['Name', 'Center', 'Position', 'Start Date', 'Rate', 'W-4'],
-        neRows, [140, 100, 80, 80, 70, 62]);
+      drawTable(['Name', 'Center', 'Position', 'Start Date', 'Rate', 'W-4'], neRows, [140, 100, 80, 80, 70, 62]);
     }
-
-    // --- SECTION 3: Terminations ---
     if (terminations && terminations.length > 0) {
       sectionHeader('Terminations — Action Required', danger);
       doc.fill(gray).fontSize(9).font('Helvetica')
@@ -1442,14 +1551,10 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
           { text: t.terminated_by || '' }
         ]
       }));
-      drawTable(['Name', 'Center', 'Last Day', 'Reason', 'Terminated By'],
-        tRows, [140, 100, 80, 130, 82]);
+      drawTable(['Name', 'Center', 'Last Day', 'Reason', 'Terminated By'], tRows, [140, 100, 80, 130, 82]);
     }
-
-    // --- SECTION 4: Hours by Center ---
     const byCenter = {};
     report.forEach(r => { if (!byCenter[r.center]) byCenter[r.center] = []; byCenter[r.center].push(r); });
-
     for (const [ctr, emps] of Object.entries(byCenter)) {
       sectionHeader(ctr);
       emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
@@ -1470,7 +1575,6 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
           ]
         };
       });
-      // Totals row
       hRows.push({
         _bg: navy,
         cells: [
@@ -1482,12 +1586,8 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
           { text: '', color: '#FFFFFF' }
         ]
       });
-      drawTable(['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Hrs', 'Unpaid'],
-        hRows, [160, 75, 75, 80, 75, 67],
-        { aligns: ['left', 'right', 'right', 'right', 'right', 'right'] });
+      drawTable(['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Hrs', 'Unpaid'], hRows, [160, 75, 75, 80, 75, 67], { aligns: ['left', 'right', 'right', 'right', 'right', 'right'] });
     }
-
-    // --- SECTION 5: W-4 Documents for New Hires ---
     if (newHireW4s && newHireW4s.length > 0) {
       for (const emp of newHireW4s) {
         if (emp.w4Data && emp.w4Data.length > 0) {
@@ -1499,7 +1599,6 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
             .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
           try {
             const imgBuffer = Buffer.from(emp.w4Data);
-            // Detect if it's an image by checking magic bytes
             const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
             const isPng = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
             if (isJpeg || isPng) {
@@ -1515,15 +1614,12 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
         }
       }
     }
-
-    // --- FOOTER on each page ---
     const totalPages = doc.bufferedPageRange().count;
     for (let i = 0; i < totalPages; i++) {
       doc.switchToPage(i);
       doc.fill(gray).fontSize(7).font('Helvetica')
         .text(`TCC Payroll Report · ${pp.label} · Page ${i + 1} of ${totalPages}`, 40, 750, { align: 'center', width: pageW });
     }
-
     doc.end();
   });
 }
@@ -1532,12 +1628,9 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const user = req.session.user;
-
-    // Reuse the payroll report data gathering logic
     const empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY e.center, e.last_name, e.first_name`;
     const empsResult = await pool.query(empQuery, [pp.start, pp.end]);
     let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, user));
-
     const report = [];
     for (const emp of empRows) {
       const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
@@ -1583,8 +1676,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         ptoDays, unpaidDays, payIncreases: increases.rows, weekDetails
       });
     }
-
-    // Terminations
     const termResult = await pool.query(
       `SELECT * FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL AND terminated_date >= $1 ORDER BY terminated_date DESC`, [pp.start]);
     const terminations = termResult.rows.map(t => ({
@@ -1592,8 +1683,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       center: t.center, terminated_date: t.terminated_date,
       termination_reason: t.termination_reason, terminated_by: t.terminated_by
     }));
-
-    // New hire W-4 documents
     const ppStartDate = new Date(pp.start + 'T12:00:00');
     const ppEndDate = new Date(pp.end + 'T12:00:00');
     const newHireW4s = [];
@@ -1601,7 +1690,6 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       if (emp.start_date) {
         const sd = new Date(emp.start_date);
         if (sd >= ppStartDate && sd <= ppEndDate) {
-          // Fetch W-4 document
           const w4 = await pool.query(
             `SELECT file_data FROM documents WHERE employee_id = $1 AND doc_type = 'W-4' ORDER BY created_at DESC LIMIT 1`, [emp.id]);
           newHireW4s.push({
@@ -1613,19 +1701,13 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         }
       }
     }
-
-    // Generate PDF
     const pdfBuffer = await generatePayrollPDF(pp, report, terminations, newHireW4s);
-
-    // Auto-save to archive
     await pool.query(
       `INSERT INTO payroll_report_archives (period_start, period_end, pay_date, period_label, report_data, pdf_data, generated_by, generated_by_user_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        ON CONFLICT (period_start, period_end) DO UPDATE SET report_data = $5, pdf_data = $6, generated_by = $7, generated_by_user_id = $8, pay_date = $3, period_label = $4, created_at = NOW()`,
       [pp.start, pp.end, pp.payDate, pp.label, JSON.stringify({ payPeriod: pp, report, terminations }), pdfBuffer, user.full_name, user.id]
     );
-
-    // Send PDF
     const filename = `TCC-Payroll-${pp.start}-to-${pp.end}.pdf`;
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
