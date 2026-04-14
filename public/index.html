@@ -2311,17 +2311,31 @@ async function dirUploadTimecard() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     
-    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-top:12px">
-      <div style="font-weight:700;color:#27500A;margin-bottom:6px">✅ Upload Complete</div>
-      <div style="font-size:13px;color:#3B6D11">Processed ${data.imported} timecard rows — ${data.matched} matched to employees, ${data.savedDays} daily hour records saved.</div>
-    </div>`;
+    let html = '';
     
+    // ---- UNMATCHED NAMES WARNING (prominent, before success) ----
     if (data.unmatchedNames && data.unmatchedNames.length > 0) {
-      html += `<div style="background:#FDF6EC;border:1px solid #C8963E;border-radius:8px;padding:12px;margin-top:8px;font-size:12px;color:#8B6914">
-        ⚠ ${data.unmatched} rows could not be matched: <strong>${data.unmatchedNames.join(', ')}</strong>
-        <span style="color:var(--gray-400);margin-left:8px">These staff may need to be added to the Employee Roster first.</span>
+      html += `<div style="background:var(--danger-bg);border:2px solid var(--danger);border-radius:8px;padding:16px;margin-top:12px">
+        <div style="font-size:15px;font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ ${data.unmatchedNames.length} Name(s) Not Found in Roster</div>
+        <p style="font-size:13px;color:var(--navy);margin-bottom:12px">The following names from the Playground CSV do not match any active employee on the roster. Their hours were <strong>NOT imported</strong>.</p>
+        <div style="margin-bottom:12px">
+          ${data.unmatchedNames.map(n => '<div style="padding:6px 12px;background:white;border-radius:6px;margin-bottom:4px;font-weight:600;display:flex;align-items:center;gap:8px"><span style="color:var(--danger)">✕</span> ' + n + '</div>').join('')}
+        </div>
+        <div style="font-size:13px;color:var(--navy);padding:12px;background:white;border-radius:6px;border-left:4px solid var(--warning)">
+          <strong>What to do:</strong>
+          <div style="margin-top:6px">1. <strong>Check with Amy (HR)</strong> — Has this person been terminated? If they still work here, they may need to be <strong>reinstated</strong> in this app before payroll can be processed.</div>
+          <div style="margin-top:4px">2. <strong>Check the name spelling</strong> — The first and last name in the <strong>Playground app must match the roster name</strong> in Payroll Hub exactly. If someone goes by a nickname or has a different spelling in Playground, the roster name or Playground name needs to be updated to match.</div>
+          <div style="margin-top:4px">3. Once resolved, <strong>re-upload the CSV</strong> to capture their hours.</div>
+        </div>
       </div>`;
     }
+    
+    // ---- SUCCESS SUMMARY ----
+    html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-top:12px">
+      <div style="font-weight:700;color:#27500A;margin-bottom:6px">✅ Upload Complete</div>
+      <div style="font-size:13px;color:#3B6D11">Processed ${data.imported} timecard rows — ${data.matched} matched to employees, ${data.savedDays} daily hour records saved.</div>
+      ${data.totalBreaksDeducted > 0 ? '<div style="font-size:13px;color:#3B6D11;margin-top:4px">🍽️ <strong>' + data.totalBreaksDeducted.toFixed(1) + ' total break hours</strong> deducted across all employees (lunch time is unpaid).</div>' : ''}
+    </div>`;
     
     // Show daily hours summary grid
     const pp = dirPayrollPP || payPeriod;
@@ -2682,21 +2696,31 @@ async function importTimecard() {
   if (result.error) {
     resultEl.innerHTML = `<div class="confidentiality-banner" style="background:var(--danger-bg);border-color:var(--danger);color:var(--danger)">Error: ${result.error}</div>`;
   } else {
-    let html = `<div class="confidentiality-banner" style="background:var(--success-bg);border-color:var(--success);color:var(--success)">
-      ✅ Processed ${result.imported} timecard rows — ${result.matched} matched to employees, ${result.savedDays} daily hour records saved.
-    </div>`;
+    let html = '';
     
-    if (result.unmatched > 0) {
-      html += `<div class="confidentiality-banner" style="background:var(--warning-bg);border-color:var(--warning);color:var(--warning)">
-        ⚠️ ${result.unmatched} rows could not be matched: ${result.unmatchedNames.join(', ')}
-        <br><small>These staff may need to be added to the Employee Roster first.</small>
+    if (result.unmatchedNames && result.unmatchedNames.length > 0) {
+      html += `<div style="background:var(--danger-bg);border:2px solid var(--danger);border-radius:8px;padding:16px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ ${result.unmatchedNames.length} Name(s) Not Found in Roster</div>
+        <p style="font-size:13px;color:var(--navy);margin-bottom:12px">These names from the CSV do not match any active employee. Their hours were <strong>NOT imported</strong>.</p>
+        ${result.unmatchedNames.map(n => '<div style="padding:6px 12px;background:white;border-radius:6px;margin-bottom:4px;font-weight:600"><span style="color:var(--danger)">✕</span> ' + n + '</div>').join('')}
+        <div style="font-size:12px;color:var(--navy);margin-top:8px;padding:10px;background:white;border-radius:6px;border-left:4px solid var(--warning)">
+          <strong>Check with HR:</strong> Staff may need to be reinstated, or their name in Playground may not match the roster name in Payroll Hub.
+        </div>
       </div>`;
     }
     
+    html += `<div class="confidentiality-banner" style="background:var(--success-bg);border-color:var(--success);color:var(--success)">
+      ✅ Processed ${result.imported} timecard rows — ${result.matched} matched to employees, ${result.savedDays} daily hour records saved.
+      ${result.totalBreaksDeducted > 0 ? '<br>🍽️ <strong>' + result.totalBreaksDeducted.toFixed(1) + ' break hours</strong> deducted (lunch is unpaid).' : ''}
+    </div>`;
+    
     if (result.preview && result.preview.length > 0) {
-      html += `<div class="table-scroll" style="margin-top:12px"><table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
+      html += `<div class="table-scroll" style="margin-top:12px"><table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Breaks</th><th>Payable Hrs</th></tr></thead><tbody>`;
       result.preview.slice(0,20).forEach(r => {
-        html += `<tr><td><strong>${r.name}</strong></td><td>${r.date}</td><td>${r.billable}</td><td style="font-family:'JetBrains Mono',monospace">${r.hours}</td></tr>`;
+        const hasBreak = r.breakHours && parseFloat(r.breakHours) > 0;
+        html += `<tr><td><strong>${r.name}</strong></td><td>${r.date}</td><td>${r.billable}</td>
+          <td style="${hasBreak ? 'color:var(--warning);font-weight:600' : ''}">${r.breaks || '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${r.hours}</td></tr>`;
       });
       html += `</tbody></table></div>`;
     }
@@ -3164,19 +3188,31 @@ async function renderStaffingPlan() {
   });
   
   const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
-  const orderedClassrooms = template.map(t => t.section);
+  const templateSections = template.map(t => t.section);
+  
+  // Only show classrooms from this center's template — no extras
+  const nonTemplateStaff = [];
   Object.keys(classroomMap).forEach(c => {
-    if (!orderedClassrooms.includes(c)) orderedClassrooms.push(c);
+    if (!templateSections.includes(c)) {
+      classroomMap[c].forEach(s => {
+        if ((s.entry_type || 'staff') === 'staff') nonTemplateStaff.push(s);
+      });
+    }
   });
+  const orderedClassrooms = [...templateSections];
+  
+  const canManageSubs = ['owner','hr','payroll'].includes(currentUser.role);
   
   // Build flat list of all staff with their classroom for move functionality
   window._spCenter = center;
   window._spClassrooms = orderedClassrooms;
   
   // ---- UNASSIGNED STAFF SECTION ----
-  if (canEdit && unassigned.length > 0) {
+  const wrongClassroomStaff = nonTemplateStaff.filter(s => s.employee_id && !unassigned.find(u => u.id === s.employee_id));
+  if (canEdit && (unassigned.length > 0 || wrongClassroomStaff.length > 0)) {
+    const totalCount = unassigned.length + wrongClassroomStaff.length;
     html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
-      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${unassigned.length})</h3></div>
+      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${totalCount})</h3></div>
       <div class="card-body">
       <div style="display:flex;flex-wrap:wrap;gap:8px">`;
     unassigned.forEach(e => {
@@ -3184,6 +3220,13 @@ async function renderStaffingPlan() {
         👤 ${e.last_name}, ${e.first_name}
         <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
         <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
+      </div>`;
+    });
+    wrongClassroomStaff.forEach(s => {
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--danger-bg);border:1.5px solid var(--danger);border-radius:20px;font-size:12px;font-weight:600">
+        👤 ${s.first_name} ${s.last_name}
+        <span style="font-size:10px;color:var(--danger)">Wrong classroom: "${s.classroom}"</span>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="moveStaffEntry(${s.id},'${(s.first_name||'')} ${(s.last_name||'')}')">Reassign →</button>
       </div>`;
     });
     html += `</div></div></div>`;
@@ -3219,41 +3262,97 @@ async function renderStaffingPlan() {
   orderedClassrooms.forEach(classroom => {
     const staff = classroomMap[classroom] || [];
     const colSpan = canEdit ? 21 : 19;
+    const isSubs = classroom === 'Subs from other centers';
+    const isTherapists = classroom === 'Therapist / Unsupervised Volunteers';
+    const isVolunteers = classroom === 'Supervised Volunteers';
+    
     html += `<tr style="background:var(--navy);color:white">
-      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">${classroom}</td>
-    </tr>`;
+      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span>${classroom}</span>
+          <span style="display:flex;gap:6px">`;
+    if (canManageSubs && isSubs) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showPullSubModal('${center.replace(/'/g,"\\'")}')">+ Pull Staff from Another Center</button>`;
+    }
+    if (canManageSubs && (isTherapists || isVolunteers)) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showAddExternalModal('${center.replace(/'/g,"\\'")}','${classroom.replace(/'/g,"\\'")}')">+ Add ${isTherapists ? 'Therapist/Volunteer' : 'Volunteer'}</button>`;
+    }
+    html += `</span></div></td></tr>`;
     
     if (staff.length === 0) {
       html += `<tr><td colspan="${colSpan}" style="color:var(--gray-300);font-style:italic;padding-left:30px">No staff assigned</td></tr>`;
     }
     
+    // Helper for external/volunteer rows - only show applicable fields
+    function ccExt(val, applicable) {
+      if (!applicable) return '<td style="background:var(--gray-100);color:var(--gray-300);text-align:center;font-size:9px">n/a</td>';
+      const formatted = fmtDate(val);
+      if (!formatted) return '<td style="background:#FFF3CD;color:var(--warning);font-weight:600;text-align:center">⚠</td>';
+      return '<td>' + formatted + '</td>';
+    }
+    
     staff.forEach(s => {
-      html += `<tr data-sp-id="${s.id}">
-        ${canEdit ? `<td style="text-align:center;cursor:pointer" title="Move to different classroom" onclick="moveStaffEntry(${s.id},'${s.first_name} ${s.last_name}')"><span style="font-size:14px;cursor:grab">☰</span></td>` : ''}
+      const isSub = s.entry_type === 'sub';
+      const isExternal = s.entry_type === 'external';
+      const nameDisplay = (s.first_name || '') + ' ' + (s.last_name || '');
+      const isVolunteerEntry = isExternal && (isTherapists || isVolunteers);
+      
+      let nameBadges = '';
+      if (isSub && s.source_center) nameBadges += ` <span style="font-size:9px;background:var(--info-bg);color:var(--info);padding:1px 6px;border-radius:4px;font-weight:600">📍 ${s.source_center}</span>`;
+      if (isExternal) nameBadges += ` <span style="font-size:9px;background:var(--gold-pale);color:var(--gold);padding:1px 6px;border-radius:4px;font-weight:600">External</span>`;
+      if (isSub) nameBadges += ` <span style="font-size:9px;background:rgba(46,125,79,0.1);color:var(--success);padding:1px 6px;border-radius:4px;font-weight:600">🔄 Live Sync</span>`;
+      
+      html += `<tr data-sp-id="${s.id}" style="${isSub ? 'background:rgba(36,113,163,0.04)' : isExternal ? 'background:rgba(200,150,62,0.04)' : ''}">
+        ${canEdit && !isSub ? `<td style="text-align:center;cursor:pointer" title="Move to different classroom" onclick="moveStaffEntry(${s.id},'${(s.first_name||'')} ${(s.last_name||'')}')"><span style="font-size:14px;cursor:grab">☰</span></td>` : canEdit ? '<td></td>' : ''}
         <td></td>
         <td><strong>${s.role_in_room || ''}</strong></td>
-        <td style="white-space:nowrap">${s.first_name || ''} ${s.last_name || ''}</td>
-        <td>${fmtDate(s.emp_start_date)}</td>
-        <td style="font-size:10px">${s.emp_schedule || ''}</td>
-        ${cc(s.orientation_date, true)}
-        ${cc(s.cpr_first_aid_date, true)}
-        ${cc(s.health_safety_abc_date, true)}
-        ${cc(s.health_safety_refresher, true)}
-        ${cc(s.ccbc_consent_date, true)}
-        ${cc(s.fingerprinting_date, true)}
-        ${cc(s.date_eligible, true)}
-        ${cc(s.abuse_neglect_statement, true)}
-        ${cc(s.last_evaluation, false)}
-        ${cc(s.date_promoted_lead, false)}
-        ${cc(s.date_assigned_room, false)}
-        <td style="font-size:10px">${s.education || ''}</td>
-        <td style="font-size:10px">${s.semester_hours || ''}</td>
-        <td style="font-size:10px">${s.infant_toddler_training || ''}</td>
-        ${canEdit ? `<td style="white-space:nowrap">
+        <td style="white-space:nowrap">${nameDisplay}${nameBadges}</td>
+        <td>${fmtDate(s.emp_start_date || s.external_start_date)}</td>
+        <td style="font-size:10px">${s.emp_schedule || ''}</td>`;
+      
+      if (isVolunteerEntry) {
+        html += ccExt(null, false); // orientation
+        html += ccExt(null, false); // CPR
+        html += ccExt(null, false); // H&S ABC
+        html += ccExt(null, false); // H&S Refresher
+        html += ccExt(null, false); // CCBC
+        html += ccExt(s.fingerprinting_date, true); // fingerprint
+        html += ccExt(s.date_eligible, true); // eligible
+        html += ccExt(s.abuse_neglect_statement, true); // abuse/neglect
+        html += ccExt(null, false); // last eval
+        html += ccExt(null, false); // promoted
+        html += ccExt(null, false); // room assigned
+        html += '<td></td><td></td><td></td>';
+      } else {
+        html += cc(s.orientation_date, true);
+        html += cc(s.cpr_first_aid_date, true);
+        html += cc(s.health_safety_abc_date, true);
+        html += cc(s.health_safety_refresher, true);
+        html += cc(s.ccbc_consent_date, true);
+        html += cc(s.fingerprinting_date, true);
+        html += cc(s.date_eligible, true);
+        html += cc(s.abuse_neglect_statement, true);
+        html += cc(s.last_evaluation, false);
+        html += cc(s.date_promoted_lead, false);
+        html += cc(s.date_assigned_room, false);
+        html += `<td style="font-size:10px">${s.education || ''}</td>`;
+        html += `<td style="font-size:10px">${s.semester_hours || ''}</td>`;
+        html += `<td style="font-size:10px">${s.infant_toddler_training || ''}</td>`;
+      }
+      
+      if (canEdit) {
+        if (isSub) {
+          html += `<td>${canManageSubs ? `<button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove sub" style="color:var(--danger)">✕</button>` : ''}</td>`;
+        } else if (isExternal) {
+          html += `<td style="white-space:nowrap">${canManageSubs ? `<button class="btn btn-outline btn-sm" onclick="editExternalEntry(${s.id})" title="Edit">✏️</button> <button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove" style="color:var(--danger)">✕</button>` : ''}</td>`;
+        } else {
+          html += `<td style="white-space:nowrap">
           <button class="btn btn-outline btn-sm" onclick="editStaffingEntry(${s.id})" title="Edit">✏️</button>
           <button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove" style="color:var(--danger)">✕</button>
-        </td>` : ''}
-      </tr>`;
+        </td>`;
+        }
+      }
+      html += `</tr>`;
     });
   });
   
@@ -3510,9 +3609,148 @@ async function updateStaffingEntry(spId, center) {
 }
 
 async function removeStaffingEntry(spId) {
-  if (!confirm('Remove this staff member from the staffing plan? Their employee data will be preserved.')) return;
+  if (!confirm('Remove this entry from the staffing plan? Employee data will be preserved.')) return;
   try {
     await api(`/api/staffing-plan/${spId}`, { method: 'DELETE' });
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// PULL SUB FROM ANOTHER CENTER (Option B: Live Lookup)
+// ========================
+async function showPullSubModal(targetCenter) {
+  let html = `<div class="modal-header"><h3>Pull Staff from Another Center</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:4px">Select an employee from another center to add as a sub at <strong>${targetCenter}</strong>.</p>
+      <p style="font-size:12px;color:var(--info);margin-bottom:16px">Their compliance dates will be <strong>synced live</strong> from their home center's staffing plan — Amy only needs to update dates in one place.</p>
+      <div id="pullSubList"><em style="color:var(--gray-400)">Loading staff from other centers...</em></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  try {
+    const available = await api('/api/staffing-plan/available-subs/' + encodeURIComponent(targetCenter));
+    if (available.length === 0) { document.getElementById('pullSubList').innerHTML = '<p style="color:var(--gray-400)">No staff found at other centers.</p>'; return; }
+    const byCenter = {};
+    available.forEach(e => { if (!byCenter[e.center]) byCenter[e.center] = []; byCenter[e.center].push(e); });
+    let listHtml = '';
+    for (const [ctr, emps] of Object.entries(byCenter)) {
+      listHtml += '<div style="margin-bottom:16px"><div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;padding-bottom:4px;border-bottom:2px solid var(--gold-pale)">📍 ' + ctr + '</div>';
+      emps.forEach(e => {
+        const already = e.already_added;
+        listHtml += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;margin-bottom:4px;' + (already ? 'background:var(--success-bg)' : 'background:var(--gray-50)') + '">' +
+          '<div><strong>' + e.last_name + ', ' + e.first_name + '</strong> <span style="font-size:11px;color:var(--gray-400);margin-left:8px">' + (e.position||'') + ' · ' + (e.classroom||'') + '</span></div>' +
+          (already ? '<span style="font-size:11px;color:var(--success);font-weight:600">✅ Already added</span>'
+            : '<button class="btn btn-primary btn-sm" onclick="doPullSub(' + e.id + ',\'' + targetCenter.replace(/'/g,"\\'") + '\')">+ Add as Sub</button>') + '</div>';
+      });
+      listHtml += '</div>';
+    }
+    document.getElementById('pullSubList').innerHTML = listHtml;
+  } catch(e) { document.getElementById('pullSubList').innerHTML = '<div style="color:var(--danger)">Error: ' + e.message + '</div>'; }
+}
+
+async function doPullSub(employeeId, targetCenter) {
+  try {
+    await api('/api/staffing-plan/pull-sub', { method: 'POST', body: { employee_id: employeeId, target_center: targetCenter, classroom: 'Subs from other centers' }});
+    showPullSubModal(targetCenter);
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// ADD EXTERNAL PERSON (Therapist/Volunteer)
+// ========================
+function showAddExternalModal(center, classroom) {
+  let html = `<div class="modal-header"><h3>Add ${classroom.includes('Unsupervised') ? 'Therapist / Volunteer' : 'Volunteer'}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:4px">Add a therapist or volunteer who is <strong>not</strong> on the employee roster. They will only appear on the staffing plan for licensing purposes.</p>
+      <p style="font-size:12px;color:var(--gold);margin-bottom:16px">This person will not show up on the roster, PTO summary, payroll, or any other screen.</p>
+      <div class="form-row">
+        <div class="form-group"><label>Full Name <span style="color:var(--danger)">*</span></label><input id="extName" placeholder="e.g. Dr. Sarah Johnson"></div>
+        <div class="form-group"><label>Role / Title</label><input id="extRole" placeholder="e.g. Speech Therapist, Volunteer"></div>
+      </div>
+      <div class="form-group"><label>Start Date</label><input type="date" id="extStartDate"></div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Required Compliance</h4>
+      <p style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Only fingerprint, eligible date, and abuse/neglect statement apply to volunteers and therapists.</p>
+      <div class="form-row-3">
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="extFp"></div>
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="extElig"></div>
+        <div class="form-group"><label>Abuse/Neglect Statement</label><input type="date" id="extAbuse"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doAddExternal('${center.replace(/'/g,"\\'")}','${classroom.replace(/'/g,"\\'")}')">Add to Staffing Plan</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doAddExternal(center, classroom) {
+  const name = document.getElementById('extName').value.trim();
+  if (!name) { alert('Please enter a name.'); return; }
+  try {
+    await api('/api/staffing-plan/add-external', { method: 'POST', body: {
+      external_name: name, center, classroom,
+      role_in_room: document.getElementById('extRole').value.trim() || '',
+      external_start_date: document.getElementById('extStartDate').value || null,
+      fingerprinting_date: document.getElementById('extFp').value || null,
+      date_eligible: document.getElementById('extElig').value || null,
+      abuse_neglect_statement: document.getElementById('extAbuse').value || null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// EDIT EXTERNAL PERSON
+// ========================
+async function editExternalEntry(spId) {
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  const entry = spData.find(s => s.id === spId);
+  if (!entry) return alert('Entry not found');
+  const displayName = entry.external_name || ((entry.first_name||'') + ' ' + (entry.last_name||'')).trim();
+  let html = `<div class="modal-header"><h3>Edit External Person</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Full Name</label><input id="extEditName" value="${displayName}"></div>
+        <div class="form-group"><label>Role / Title</label><input id="extEditRole" value="${entry.role_in_room||''}"></div>
+      </div>
+      <div class="form-group"><label>Start Date</label><input type="date" id="extEditStartDate" value="${datVal(entry.external_start_date)}"></div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Required Compliance</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="extEditFp" value="${datVal(entry.fingerprinting_date)}"></div>
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="extEditElig" value="${datVal(entry.date_eligible)}"></div>
+        <div class="form-group"><label>Abuse/Neglect Statement</label><input type="date" id="extEditAbuse" value="${datVal(entry.abuse_neglect_statement)}"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doUpdateExternal(${spId},'${(entry.center||'').replace(/'/g,"\\'")}','${(entry.classroom||'').replace(/'/g,"\\'")}')">Save Changes</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doUpdateExternal(spId, center, classroom) {
+  try {
+    await api('/api/staffing-plan/' + spId, { method: 'PUT', body: {
+      employee_id: null, center, classroom,
+      role_in_room: document.getElementById('extEditRole').value.trim() || '',
+      external_name: document.getElementById('extEditName').value.trim(),
+      entry_type: 'external',
+      external_start_date: document.getElementById('extEditStartDate').value || null,
+      fingerprinting_date: document.getElementById('extEditFp').value || null,
+      date_eligible: document.getElementById('extEditElig').value || null,
+      abuse_neglect_statement: document.getElementById('extEditAbuse').value || null,
+      orientation_date: null, cpr_first_aid_date: null, health_safety_abc_date: null,
+      health_safety_refresher: null, ccbc_consent_date: null, last_evaluation: null,
+      date_promoted_lead: null, date_assigned_room: null, education: null,
+      semester_hours: null, infant_toddler_training: null, source_center: null
+    }});
+    closeModal();
     renderStaffingPlan();
   } catch(e) { alert('Error: ' + e.message); }
 }
