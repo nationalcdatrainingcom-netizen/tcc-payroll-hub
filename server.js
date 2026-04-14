@@ -224,6 +224,8 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
+  // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -541,11 +543,11 @@ app.post('/api/employees', requireRole('owner', 'hr', 'payroll'), async (req, re
 
 app.put('/api/employees/:id', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
   try {
-    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours } = req.body;
+    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, payroll_center } = req.body;
     const result = await pool.query(
-      `UPDATE employees SET first_name=$1, last_name=$2, center=$3, classroom=$4, position=$5, year_hired=$6, start_date=$7, scheduled_times=$8, is_full_time=$9, weekly_hours=$10, hourly_rate=$11, is_admin=$12, is_active=$13, pto_carryover_hours=COALESCE($14, pto_carryover_hours)
+      `UPDATE employees SET first_name=$1, last_name=$2, center=$3, classroom=$4, position=$5, year_hired=$6, start_date=$7, scheduled_times=$8, is_full_time=$9, weekly_hours=$10, hourly_rate=$11, is_admin=$12, is_active=$13, pto_carryover_hours=COALESCE($14, pto_carryover_hours), payroll_center=$16
        WHERE id=$15 RETURNING *`,
-      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, req.params.id]
+      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, req.params.id, payroll_center || null]
     );
     res.json(result.rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -823,7 +825,8 @@ function parseHoursMinutes(str) {
 // Backwards-compatible alias
 function parseBillableHours(str) { return parseHoursMinutes(str); }
 
-// CSV Timecard import — hours = Billable MINUS Breaks (lunch is unpaid)
+// CSV Timecard import — Billable hours = actual payable hours
+// Cross-center support: if a name doesn't match the uploading center, check other centers
 app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), upload.single('file'), async (req, res) => {
   try {
     const results = [];
@@ -841,27 +844,24 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     });
     fs.unlinkSync(req.file.path);
     let matched = 0, unmatched = 0, totalRows = 0;
-    let totalBreaksDeducted = 0;
     const unmatchedNames = new Set();
+    const crossCenterStaff = []; // staff found at OTHER centers
     const dailySummary = {};
+    const crossCenterHours = {}; // keyed by empId, holds pending hours from other centers
     for (const row of results) {
       const lastName = (row['Last Name'] || '').trim();
       const firstName = (row['First Name'] || '').trim();
       const dateStr = (row['Date'] || '').trim();
       const billable = (row['Billable'] || '').trim();
-      const breaks = (row['Breaks'] || '').trim();
       if (!lastName || !dateStr) continue;
       totalRows++;
-      // Payable hours = Billable - Breaks (lunch is unpaid)
-      const billableHours = parseHoursMinutes(billable);
-      const breakHours = parseHoursMinutes(breaks);
-      const hours = Math.max(0, billableHours - breakHours);
-      if (breakHours > 0) totalBreaksDeducted += breakHours;
+      const hours = parseBillableHours(billable);
       const dateParts = dateStr.split('/');
       if (dateParts.length !== 3) continue;
       const isoDate = `${dateParts[2]}-${dateParts[0].padStart(2,'0')}-${dateParts[1].padStart(2,'0')}`;
+      // Try to match to any active employee (not just this center)
       const emp = await pool.query(
-        `SELECT id FROM employees WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' OR LOWER(last_name) LIKE '%' || LOWER($1) || '%') AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%') AND is_active = TRUE LIMIT 1`,
+        `SELECT id, first_name, last_name, center, COALESCE(payroll_center, center) as payroll_center FROM employees WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' OR LOWER(last_name) LIKE '%' || LOWER($1) || '%') AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%') AND is_active = TRUE LIMIT 1`,
         [lastName, firstName]);
       if (emp.rows.length > 0) {
         const empId = emp.rows[0].id;
@@ -875,25 +875,19 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
-      await pool.query(`INSERT INTO daily_hours (employee_id, work_date, hours_worked, source) VALUES ($1, $2, $3, 'import') ON CONFLICT (employee_id, work_date) DO UPDATE SET hours_worked = $3, source = 'import'`,
+      await pool.query(`INSERT INTO daily_hours (employee_id, work_date, hours_worked, source) VALUES ($1, $2, $3, 'import') ON CONFLICT (employee_id, work_date) DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
         [parseInt(eid), dt, Math.round(hours * 100) / 100]);
       savedDays++;
     }
-    const preview = results.slice(0, 40).map(r => {
-      const b = parseHoursMinutes((r['Billable']||'').trim());
-      const br = parseHoursMinutes((r['Breaks']||'').trim());
-      return {
-        name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
-        date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
-        breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
-        billableHours: b.toFixed(2), breakHours: br.toFixed(2),
-        hours: Math.max(0, b - br).toFixed(2)
-      };
-    });
+    const preview = results.slice(0, 40).map(r => ({
+      name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
+      date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
+      breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
+      hours: parseBillableHours((r['Billable']||'').trim()).toFixed(2)
+    }));
     res.json({
       imported: totalRows, matched, unmatched,
       unmatchedNames: [...unmatchedNames], savedDays, preview,
-      totalBreaksDeducted: Math.round(totalBreaksDeducted * 100) / 100,
       payPeriod: getPayPeriod(new Date())
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -1390,10 +1384,10 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
     const center = req.query.center;
     let empQuery, empParams;
     if (center) {
-      empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $2 AND dh.work_date <= $3)) AND e.center = $1 ORDER BY e.center, e.last_name, e.first_name`;
+      empQuery = `SELECT e.*, COALESCE(e.payroll_center, e.center) as effective_payroll_center FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $2 AND dh.work_date <= $3)) AND COALESCE(e.payroll_center, e.center) = $1 ORDER BY e.last_name, e.first_name`;
       empParams = [center, pp.start, pp.end];
     } else {
-      empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY e.center, e.last_name, e.first_name`;
+      empQuery = `SELECT e.*, COALESCE(e.payroll_center, e.center) as effective_payroll_center FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY COALESCE(e.payroll_center, e.center), e.last_name, e.first_name`;
       empParams = [pp.start, pp.end];
     }
     const empsResult = await pool.query(empQuery, empParams);
@@ -1447,7 +1441,7 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
       const increases = await pool.query(`SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`, [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']);
       report.push({
         id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
+        center: emp.effective_payroll_center || emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
         is_full_time: emp.is_full_time,
         totalHours: Math.round(totalHours * 100) / 100,
         regularHours: Math.round(periodRegular * 100) / 100,
