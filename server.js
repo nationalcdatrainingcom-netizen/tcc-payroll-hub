@@ -1,1875 +1,4166 @@
-const express = require('express');
-const { Pool } = require('pg');
-const bcrypt = require('bcryptjs');
-const session = require('express-session');
-const PgSession = require('connect-pg-simple')(session);
-const multer = require('multer');
-const csv = require('csv-parser');
-const fs = require('fs');
-const path = require('path');
-const jwt = require('jsonwebtoken');
-const PDFDocument = require('pdfkit');
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TCC Payroll Hub</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --navy: #1B2A4A;
+  --navy-light: #2A3F6B;
+  --navy-dark: #111D35;
+  --gold: #C8963E;
+  --gold-light: #E8B85E;
+  --gold-pale: #F5E6C8;
+  --white: #FFFFFF;
+  --gray-50: #F8F9FA;
+  --gray-100: #F0F2F5;
+  --gray-200: #E2E5EA;
+  --gray-300: #CBD0D8;
+  --gray-400: #9BA3B0;
+  --gray-600: #5A6270;
+  --gray-800: #2D3239;
+  --success: #2E7D4F;
+  --success-bg: #E8F5ED;
+  --warning: #B8860B;
+  --warning-bg: #FFF8E1;
+  --danger: #C0392B;
+  --danger-bg: #FDEDEB;
+  --info: #2471A3;
+  --info-bg: #EBF5FB;
+  --radius: 10px;
+  --shadow-sm: 0 1px 3px rgba(27,42,74,0.08);
+  --shadow-md: 0 4px 12px rgba(27,42,74,0.12);
+  --shadow-lg: 0 8px 30px rgba(27,42,74,0.18);
+}
 
-const app = express();
-const PORT = process.env.PORT || 3000;
-const HUB_JWT_SECRET = process.env.HUB_JWT_SECRET || '';
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: 'DM Sans', sans-serif; background: var(--gray-50); color: var(--gray-800); min-height: 100vh; }
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+/* ===== LOGIN ===== */
+.login-screen {
+  display: flex; align-items: center; justify-content: center; min-height: 100vh;
+  background: linear-gradient(135deg, var(--navy-dark) 0%, var(--navy) 50%, var(--navy-light) 100%);
+}
+.login-box {
+  background: var(--white); border-radius: 16px; padding: 48px 40px; width: 380px;
+  box-shadow: var(--shadow-lg); text-align: center;
+}
+.login-box h1 { color: var(--navy); font-size: 22px; font-weight: 700; margin-bottom: 4px; }
+.login-box .subtitle { color: var(--gold); font-size: 13px; font-weight: 600; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 32px; }
+.login-box input {
+  width: 100%; padding: 12px 16px; border: 2px solid var(--gray-200); border-radius: 8px;
+  font-family: inherit; font-size: 14px; margin-bottom: 12px; transition: border-color 0.2s;
+}
+.login-box input:focus { outline: none; border-color: var(--gold); }
+.login-box button {
+  width: 100%; padding: 13px; background: var(--navy); color: var(--white); border: none;
+  border-radius: 8px; font-family: inherit; font-size: 15px; font-weight: 600; cursor: pointer;
+  transition: background 0.2s; margin-top: 8px;
+}
+.login-box button:hover { background: var(--navy-light); }
+.login-error { color: var(--danger); font-size: 13px; margin-top: 8px; }
 
-// Middleware
-app.set('trust proxy', 1);
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+/* ===== APP SHELL ===== */
+.app { display: none; }
+.app.active { display: flex; min-height: 100vh; }
 
-app.use(session({
-  store: new PgSession({ pool, tableName: 'sessions', createTableIfMissing: true }),
-  secret: process.env.SESSION_SECRET || 'tcc-payroll-hub-secret-2026',
-  resave: false,
-  saveUninitialized: false,
-  cookie: {
-    maxAge: 7 * 24 * 60 * 60 * 1000,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: process.env.NODE_ENV === 'production' ? 'none' : 'lax',
-    httpOnly: true
-  }
-}));
+.sidebar {
+  width: 250px; background: var(--navy); color: var(--white); padding: 0; flex-shrink: 0;
+  display: flex; flex-direction: column; position: fixed; top: 0; left: 0; bottom: 0; z-index: 100;
+}
+.sidebar-header {
+  padding: 24px 20px 16px; border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+.sidebar-header h2 { font-size: 16px; font-weight: 700; }
+.sidebar-header .role-badge {
+  display: inline-block; background: var(--gold); color: var(--navy-dark); font-size: 10px;
+  font-weight: 700; padding: 3px 8px; border-radius: 4px; margin-top: 6px; text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sidebar-header .center-name { font-size: 12px; color: var(--gold-light); margin-top: 4px; }
 
-// ─── HUB SSO: Auto-login via JWT token from TCC Hub ──────────────────────────
-app.use(async (req, res, next) => {
-  if (req.session && req.session.user) return next();
-  const token = req.query.hub_token
-    || (req.headers.authorization && req.headers.authorization.startsWith('Bearer ')
-        ? req.headers.authorization.slice(7) : null);
-  if (!token || !HUB_JWT_SECRET) return next();
+.sidebar-nav { flex: 1; padding: 12px 0; overflow-y: auto; }
+.nav-item {
+  display: flex; align-items: center; gap: 12px; padding: 11px 20px; cursor: pointer;
+  font-size: 13px; font-weight: 500; color: rgba(255,255,255,0.7); transition: all 0.15s;
+  border-left: 3px solid transparent;
+}
+.nav-item:hover { background: rgba(255,255,255,0.06); color: var(--white); }
+.nav-item.active { background: rgba(200,150,62,0.15); color: var(--gold-light); border-left-color: var(--gold); }
+.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+.nav-item .badge {
+  margin-left: auto; background: var(--danger); color: white; font-size: 10px; font-weight: 700;
+  padding: 2px 7px; border-radius: 10px;
+}
+.nav-section { padding: 16px 20px 6px; font-size: 10px; font-weight: 700; color: rgba(255,255,255,0.35); text-transform: uppercase; letter-spacing: 1.5px; }
+
+.sidebar-footer { padding: 16px 20px; border-top: 1px solid rgba(255,255,255,0.1); }
+.sidebar-footer button {
+  width: 100%; padding: 8px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+  color: rgba(255,255,255,0.7); border-radius: 6px; font-family: inherit; font-size: 12px; cursor: pointer;
+}
+.sidebar-footer button:hover { background: rgba(255,255,255,0.12); color: white; }
+
+.main-content { margin-left: 250px; flex: 1; padding: 0; min-height: 100vh; }
+.top-bar {
+  background: var(--white); border-bottom: 1px solid var(--gray-200); padding: 16px 32px;
+  display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 50;
+}
+.top-bar h1 { font-size: 20px; font-weight: 700; color: var(--navy); }
+.pay-period-badge {
+  display: flex; align-items: center; gap: 8px; background: var(--gold-pale); color: var(--navy);
+  padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+}
+.pay-period-badge .label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gold); }
+
+.page-content { padding: 28px 32px; }
+
+/* ===== CONFIDENTIALITY BANNER ===== */
+.confidentiality-banner {
+  background: var(--warning-bg); border: 1px solid var(--warning); border-radius: var(--radius);
+  padding: 12px 20px; margin-bottom: 20px; font-size: 12px; color: var(--warning); font-weight: 600;
+  display: flex; align-items: center; gap: 10px;
+}
+
+/* ===== CARDS ===== */
+.stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.stat-card {
+  background: var(--white); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow-sm);
+  border-left: 4px solid var(--navy);
+}
+.stat-card.gold { border-left-color: var(--gold); }
+.stat-card.green { border-left-color: var(--success); }
+.stat-card.red { border-left-color: var(--danger); }
+.stat-card .stat-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--gray-400); margin-bottom: 6px; }
+.stat-card .stat-value { font-size: 28px; font-weight: 700; color: var(--navy); }
+.stat-card .stat-sub { font-size: 12px; color: var(--gray-600); margin-top: 4px; }
+
+.card {
+  background: var(--white); border-radius: var(--radius); box-shadow: var(--shadow-sm);
+  margin-bottom: 20px; overflow: hidden;
+}
+.card-header {
+  padding: 16px 20px; border-bottom: 1px solid var(--gray-100); display: flex;
+  align-items: center; justify-content: space-between;
+}
+.card-header h3 { font-size: 15px; font-weight: 700; color: var(--navy); }
+.card-body { padding: 20px; }
+
+/* ===== TABLE ===== */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.data-table th {
+  text-align: left; padding: 10px 14px; background: var(--gray-50); color: var(--gray-600);
+  font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+  border-bottom: 2px solid var(--gray-200); white-space: nowrap;
+}
+.data-table td { padding: 10px 14px; border-bottom: 1px solid var(--gray-100); vertical-align: middle; }
+.data-table tr:hover { background: var(--gray-50); }
+.data-table tr.clickable { cursor: pointer; }
+.data-table tr.clickable:hover { background: rgba(200,150,62,0.06); }
+
+/* ===== BUTTONS ===== */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border-radius: 6px;
+  font-family: inherit; font-size: 13px; font-weight: 600; cursor: pointer; border: none;
+  transition: all 0.15s;
+}
+.btn-primary { background: var(--navy); color: var(--white); }
+.btn-primary:hover { background: var(--navy-light); }
+.btn-gold { background: var(--gold); color: var(--white); }
+.btn-gold:hover { background: var(--gold-light); }
+.btn-outline { background: transparent; border: 1.5px solid var(--gray-300); color: var(--gray-600); }
+.btn-outline:hover { border-color: var(--navy); color: var(--navy); }
+.btn-success { background: var(--success); color: white; }
+.btn-danger { background: var(--danger); color: white; }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+/* ===== FORMS ===== */
+.form-group { margin-bottom: 16px; }
+.form-group label { display: block; font-size: 12px; font-weight: 600; color: var(--gray-600); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.3px; }
+.form-group input, .form-group select, .form-group textarea {
+  width: 100%; padding: 10px 12px; border: 1.5px solid var(--gray-200); border-radius: 6px;
+  font-family: inherit; font-size: 14px; transition: border-color 0.2s;
+}
+.form-group input:focus, .form-group select:focus, .form-group textarea:focus { outline: none; border-color: var(--gold); }
+.form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-row-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+/* ===== BADGES ===== */
+.badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge-success { background: var(--success-bg); color: var(--success); }
+.badge-warning { background: var(--warning-bg); color: var(--warning); }
+.badge-danger { background: var(--danger-bg); color: var(--danger); }
+.badge-info { background: var(--info-bg); color: var(--info); }
+.badge-navy { background: rgba(27,42,74,0.1); color: var(--navy); }
+
+/* ===== MODAL ===== */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(17,29,53,0.5);
+  z-index: 200; align-items: center; justify-content: center; padding: 20px;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--white); border-radius: 12px; width: 100%; max-width: 600px;
+  max-height: 85vh; overflow-y: auto; box-shadow: var(--shadow-lg);
+}
+.modal-header {
+  padding: 20px 24px; border-bottom: 1px solid var(--gray-200); display: flex;
+  align-items: center; justify-content: space-between; position: sticky; top: 0;
+  background: var(--white); border-radius: 12px 12px 0 0; z-index: 1;
+}
+.modal-header h3 { font-size: 17px; font-weight: 700; color: var(--navy); }
+.modal-close { background: none; border: none; font-size: 22px; cursor: pointer; color: var(--gray-400); padding: 4px; }
+.modal-body { padding: 24px; }
+.modal-footer { padding: 16px 24px; border-top: 1px solid var(--gray-100); display: flex; justify-content: flex-end; gap: 10px; }
+
+/* ===== TIME OFF CALENDAR ===== */
+.month-nav { display: flex; align-items: center; gap: 16px; margin-bottom: 20px; }
+.month-nav h3 { font-size: 16px; font-weight: 700; color: var(--navy); min-width: 160px; text-align: center; }
+.month-nav button { background: var(--gray-100); border: none; border-radius: 6px; padding: 8px 12px; cursor: pointer; font-size: 14px; }
+
+.calendar-grid { width: 100%; border-collapse: collapse; font-size: 12px; }
+.calendar-grid th { padding: 6px 4px; background: var(--navy); color: white; text-align: center; font-size: 10px; font-weight: 600; min-width: 32px; }
+.calendar-grid th.name-col { min-width: 120px; text-align: left; padding-left: 10px; }
+.calendar-grid td { padding: 4px; text-align: center; border: 1px solid var(--gray-200); height: 32px; }
+.calendar-grid td.name-cell { text-align: left; padding-left: 10px; font-weight: 600; font-size: 11px; background: var(--gray-50); white-space: nowrap; }
+.calendar-grid td.weekend { background: var(--gray-100); }
+.calendar-grid td .day-btn {
+  width: 26px; height: 26px; border-radius: 4px; border: none; cursor: pointer;
+  font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center;
+}
+.day-btn.paid { background: #2196F3; color: white; }
+.day-btn.unpaid { background: #FF5252; color: white; }
+.day-btn.empty { background: var(--gray-100); color: var(--gray-400); }
+.day-btn.empty:hover { background: var(--gray-200); }
+
+/* ===== OT DISPLAY ===== */
+.ot-week { background: var(--gray-50); border-radius: 8px; padding: 12px; margin-bottom: 10px; }
+.ot-week .week-label { font-size: 11px; font-weight: 700; color: var(--gray-600); margin-bottom: 8px; }
+.ot-days { display: flex; gap: 6px; }
+.ot-day { 
+  flex: 1; text-align: center; padding: 6px 4px; border-radius: 6px; font-size: 11px;
+  background: white; border: 1px solid var(--gray-200);
+}
+.ot-day.in-period { border-color: var(--navy); background: rgba(27,42,74,0.04); }
+.ot-day.out-period { opacity: 0.5; }
+.ot-day .day-name { font-weight: 600; font-size: 10px; color: var(--gray-400); }
+.ot-day .day-hrs { font-weight: 700; font-size: 14px; color: var(--navy); margin-top: 2px; }
+.ot-summary { display: flex; gap: 16px; margin-top: 4px; font-size: 12px; font-weight: 600; }
+.ot-summary .regular { color: var(--success); }
+.ot-summary .overtime { color: var(--danger); }
+
+/* ===== SIGNATURE ===== */
+.sig-canvas { border: 2px dashed var(--gray-300); border-radius: 8px; cursor: crosshair; }
+
+/* ===== TABS ===== */
+.tabs { display: flex; gap: 0; border-bottom: 2px solid var(--gray-200); margin-bottom: 20px; }
+.tab {
+  padding: 10px 20px; font-size: 13px; font-weight: 600; color: var(--gray-400); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -2px; transition: all 0.15s;
+}
+.tab:hover { color: var(--navy); }
+.tab.active { color: var(--navy); border-bottom-color: var(--gold); }
+
+/* ===== CENTERS TAB SELECTOR ===== */
+.center-tabs { display: flex; gap: 8px; margin-bottom: 20px; }
+.center-tab {
+  padding: 8px 20px; border-radius: 20px; font-size: 13px; font-weight: 600;
+  cursor: pointer; border: 2px solid var(--gray-200); color: var(--gray-600); transition: all 0.15s;
+}
+.center-tab:hover { border-color: var(--gold); color: var(--gold); }
+.center-tab.active { background: var(--navy); border-color: var(--navy); color: white; }
+
+/* Scrollable table wrapper */
+.table-scroll { overflow-x: auto; }
+
+/* ===== RESPONSIVE ===== */
+/* Hamburger toggle button */
+.sidebar-toggle {
+  display: none; position: fixed; top: 12px; left: 12px; z-index: 150;
+  width: 40px; height: 40px; border-radius: 8px; border: none;
+  background: var(--navy); color: white; font-size: 22px; cursor: pointer;
+  align-items: center; justify-content: center; box-shadow: var(--shadow-md);
+  transition: left 0.3s ease;
+}
+.sidebar-toggle:hover { background: var(--navy-light); }
+
+/* Sidebar collapsed state */
+.sidebar.collapsed { transform: translateX(-250px); }
+.sidebar { transition: transform 0.3s ease; }
+
+/* Overlay when sidebar is open on mobile/tablet */
+.sidebar-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(17,29,53,0.4);
+  z-index: 99; opacity: 0; transition: opacity 0.3s ease;
+}
+.sidebar-overlay.active { display: block; opacity: 1; }
+
+@media (max-width: 1100px) {
+  .sidebar-toggle { display: flex; }
+  .sidebar { transform: translateX(-250px); }
+  .sidebar.open { transform: translateX(0); }
+  .main-content { margin-left: 0 !important; }
+  .top-bar { padding-left: 60px; }
+  .page-content { padding: 16px; }
+  .stats-row { grid-template-columns: 1fr 1fr; }
+  .form-row, .form-row-3 { grid-template-columns: 1fr; }
+}
+
+@media (min-width: 1101px) {
+  .sidebar { transform: translateX(0) !important; }
+  .sidebar-toggle { display: none !important; }
+  .main-content { margin-left: 250px; }
+}
+
+.hidden { display: none !important; }
+.text-center { text-align: center; }
+.text-right { text-align: right; }
+.mt-4 { margin-top: 16px; }
+.mb-4 { margin-bottom: 16px; }
+.gap-2 { gap: 8px; }
+.flex { display: flex; }
+.items-center { align-items: center; }
+.justify-between { justify-content: space-between; }
+
+.empty-state { text-align: center; padding: 48px 20px; color: var(--gray-400); }
+.empty-state .icon { font-size: 48px; margin-bottom: 12px; }
+.empty-state p { font-size: 14px; }
+</style>
+</head>
+<body>
+
+<!-- LOGIN SCREEN -->
+<div id="loginScreen" class="login-screen">
+  <div class="login-box">
+    <h1>TCC Payroll Hub</h1>
+    <div class="subtitle">The Children's Center</div>
+    <input type="text" id="loginUser" placeholder="Username" autocomplete="username">
+    <input type="password" id="loginPass" placeholder="Password" autocomplete="current-password">
+    <button onclick="doLogin()">Sign In</button>
+    <div id="loginError" class="login-error"></div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app" class="app">
+  <!-- Hamburger toggle -->
+  <button class="sidebar-toggle" id="sidebarToggle" onclick="toggleSidebar()">☰</button>
+  <!-- Overlay for closing sidebar on tap -->
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="closeSidebar()"></div>
+  
+  <!-- Sidebar -->
+  <nav class="sidebar" id="sidebarEl">
+    <div class="sidebar-header">
+      <h2 id="sidebarName"></h2>
+      <span class="role-badge" id="sidebarRole"></span>
+      <div class="center-name" id="sidebarCenter"></div>
+    </div>
+    <div class="sidebar-nav" id="sidebarNav"></div>
+    <div class="sidebar-footer">
+      <button onclick="doLogout()">Sign Out</button>
+    </div>
+  </nav>
+
+  <!-- Main -->
+  <div class="main-content">
+    <div class="top-bar">
+      <h1 id="pageTitle">Dashboard</h1>
+      <div class="pay-period-badge">
+        <div>
+          <div class="label">Current Pay Period</div>
+          <div id="payPeriodLabel">Loading...</div>
+        </div>
+      </div>
+    </div>
+    <div class="page-content" id="pageContent"></div>
+  </div>
+</div>
+
+<!-- MODALS -->
+<div class="modal-overlay" id="modalOverlay">
+  <div class="modal" id="modalContent"></div>
+</div>
+
+<script>
+// ========================
+// STATE
+// ========================
+let currentUser = null;
+let employees = [];
+let payPeriod = null;
+let currentPage = 'dashboard';
+let currentMonth = new Date().getMonth() + 1;
+let currentYear = new Date().getFullYear();
+let selectedCenter = 'all';
+let pendingIncreases = 0; let otViewCenter = 'all'; let otViewShowAll = false;
+
+const CENTERS = ['Peace Boulevard', 'Niles', 'Montessori'];
+const PEACE_CLASSROOMS = [
+  { section: 'Infants - Caterpillars', roles: ['Co-Lead','Co-Lead'] },
+  { section: 'Infants/Toddlers - Butterflies', roles: ['Lead','Assistant'] },
+  { section: 'Toddlers - Dolphins', roles: ['Lead','Assistant'] },
+  { section: 'Toddlers - Kangas', roles: ['Lead','Assistant'] },
+  { section: 'Toddlers - Lions', roles: ['Lead','Assistant'] },
+  { section: 'Montessori Infants', roles: ['Lead','Assistant','Assistant','Assistant'] },
+  { section: 'Twos - Bears', roles: ['Lead','Assistant'] },
+  { section: 'Twos/Threes - Tigers', roles: ['Lead','Assistant'] },
+  { section: 'GSRP - Penguins', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Dinos', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Threes/Fours Flamingos', roles: ['Lead','Assistant'] },
+  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater','Floater','Floater','Floater'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
+  { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
+];
+
+const NILES_CLASSROOMS = [
+  { section: 'Infants/Ones', roles: ['Lead','Assistant','Assistant','Assistant'] },
+  { section: 'Ones/Twos', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Strong Beginnings - Threes', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - 1 (4-Day)', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - 2 (4-Day)', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Toddler', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Multi-Age - Miss Judy', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub'] },
+  { section: 'Therapist / Unsupervised Volunteers', roles: ['','',''] },
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
+];
+
+const MCC_CLASSROOMS = [
+  { section: 'Toddlers - Purple', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Pre-Primary - Yellow', roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Primary - Red', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Orange', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Blue', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'GSRP - Pink', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater'] },
+  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
+  { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
+  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
+  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
+];
+
+const CENTER_CLASSROOMS = {
+  'Peace Boulevard': PEACE_CLASSROOMS,
+  'Niles': NILES_CLASSROOMS,
+  'Montessori': MCC_CLASSROOMS
+};
+
+const REASON_CATEGORIES = ['Position Change', 'Education Level', 'CDA Credential', 'Registered Apprentice Hours', 'Annual Review', 'Market Adjustment', 'Other'];
+
+// ========================
+// API HELPERS
+// ========================
+async function api(url, opts = {}) {
+  const res = await fetch(url, {
+    headers: { 'Content-Type': 'application/json', ...opts.headers },
+    credentials: 'include',
+    ...opts,
+    body: opts.body ? (typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body)) : undefined
+  });
+  if (res.status === 401) { showLogin(); throw new Error('Not authenticated'); }
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}
+
+async function apiForm(url, formData) {
+  const res = await fetch(url, { method: 'POST', body: formData, credentials: 'include' });
+  return res.json();
+}
+
+// ========================
+// AUTH
+// ========================
+async function doLogin() {
+  const username = document.getElementById('loginUser').value.trim();
+  const password = document.getElementById('loginPass').value;
   try {
-    const decoded = jwt.verify(token, HUB_JWT_SECRET);
-    const hubUsername = decoded.username.toLowerCase();
-    const hubRole = decoded.role;
-    const hubCenter = decoded.center;
-    const result = await pool.query('SELECT * FROM users WHERE LOWER(username) = $1', [hubUsername]);
-    let user = result.rows[0];
-    if (!user && hubCenter && hubCenter !== 'all') {
-      const centerMap = { 'peace': 'Peace Boulevard', 'niles': 'Niles', 'montessori': 'Montessori' };
-      const mappedCenter = centerMap[hubCenter] || hubCenter;
-      const dirResult = await pool.query("SELECT * FROM users WHERE role = 'director' AND center = $1 LIMIT 1", [mappedCenter]);
-      user = dirResult.rows[0];
-    }
-    if (!user && hubRole === 'owner') {
-      const ownerResult = await pool.query("SELECT * FROM users WHERE role = 'owner' LIMIT 1");
-      user = ownerResult.rows[0];
-    }
-    if (!user && (hubRole === 'hr' || hubRole === 'payroll')) {
-      const roleResult = await pool.query("SELECT * FROM users WHERE role = $1 LIMIT 1", [hubRole]);
-      user = roleResult.rows[0];
-    }
-    if (user) {
-      req.session.user = {
-        id: user.id, username: user.username, full_name: user.full_name,
-        role: user.role, center: user.center
-      };
-    }
-  } catch (e) { }
-  next();
-});
-
-const upload = multer({ dest: '/tmp/uploads/', limits: { fileSize: 10 * 1024 * 1024 } });
-
-// ========================
-// DATABASE INITIALIZATION
-// ========================
-async function initDB() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS users (
-      id SERIAL PRIMARY KEY,
-      username VARCHAR(100) UNIQUE NOT NULL,
-      password_hash VARCHAR(255) NOT NULL,
-      full_name VARCHAR(200) NOT NULL,
-      role VARCHAR(50) NOT NULL CHECK (role IN ('owner','payroll','hr','director')),
-      center VARCHAR(100),
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS employees (
-      id SERIAL PRIMARY KEY,
-      first_name VARCHAR(100) NOT NULL,
-      last_name VARCHAR(100) NOT NULL,
-      center VARCHAR(100) NOT NULL,
-      classroom VARCHAR(200),
-      position VARCHAR(100) DEFAULT 'Assistant',
-      year_hired INTEGER NOT NULL,
-      start_date DATE,
-      scheduled_times VARCHAR(100),
-      is_full_time BOOLEAN DEFAULT TRUE,
-      weekly_hours NUMERIC(5,2) DEFAULT 40,
-      hourly_rate NUMERIC(8,2),
-      is_active BOOLEAN DEFAULT TRUE,
-      is_admin BOOLEAN DEFAULT FALSE,
-      pto_carryover_hours NUMERIC(6,2) DEFAULT 0,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS time_off_entries (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      entry_date DATE NOT NULL,
-      entry_type VARCHAR(1) NOT NULL CHECK (entry_type IN ('P','U')),
-      entered_by INTEGER REFERENCES users(id),
-      notes TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(employee_id, entry_date)
-    );
-    CREATE TABLE IF NOT EXISTS pay_increase_requests (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      requested_by INTEGER REFERENCES users(id),
-      reason_category VARCHAR(100) NOT NULL,
-      reason_detail TEXT,
-      current_rate NUMERIC(8,2),
-      proposed_rate NUMERIC(8,2),
-      status VARCHAR(20) DEFAULT 'pending' CHECK (status IN ('pending','approved','denied')),
-      reviewed_by INTEGER REFERENCES users(id),
-      review_notes TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      reviewed_at TIMESTAMP
-    );
-    CREATE TABLE IF NOT EXISTS documents (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      doc_type VARCHAR(100) NOT NULL,
-      file_name VARCHAR(255) NOT NULL,
-      file_data BYTEA,
-      notes TEXT,
-      uploaded_by INTEGER REFERENCES users(id),
-      affects_pay_period VARCHAR(50),
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS timecard_imports (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      pay_period_start DATE NOT NULL,
-      pay_period_end DATE NOT NULL,
-      import_date DATE NOT NULL,
-      raw_data JSONB,
-      total_hours NUMERIC(6,2),
-      regular_hours NUMERIC(6,2),
-      overtime_hours NUMERIC(6,2),
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS daily_hours (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      work_date DATE NOT NULL,
-      hours_worked NUMERIC(5,2) DEFAULT 0,
-      source VARCHAR(50) DEFAULT 'import',
-      created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(employee_id, work_date)
-    );
-    CREATE TABLE IF NOT EXISTS staffing_plan (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      center VARCHAR(100) NOT NULL,
-      classroom VARCHAR(200) NOT NULL,
-      role_in_room VARCHAR(100),
-      orientation_date DATE, cpr_first_aid_date DATE, health_safety_abc_date DATE,
-      health_safety_refresher DATE, ccbc_consent_date DATE, fingerprinting_date DATE,
-      date_eligible DATE, abuse_neglect_statement DATE, last_evaluation DATE,
-      date_promoted_lead DATE, date_assigned_room DATE,
-      education TEXT, semester_hours TEXT, infant_toddler_training TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key VARCHAR(100) PRIMARY KEY,
-      value TEXT,
-      updated_at TIMESTAMP DEFAULT NOW()
-    );
-    CREATE TABLE IF NOT EXISTS payroll_periods (
-      id SERIAL PRIMARY KEY,
-      period_start DATE NOT NULL,
-      period_end DATE NOT NULL,
-      pay_date DATE NOT NULL,
-      center VARCHAR(100) NOT NULL,
-      status VARCHAR(30) DEFAULT 'open' CHECK (status IN ('open','director_submitted','processing','closed')),
-      timecards_uploaded BOOLEAN DEFAULT FALSE,
-      timecards_signed_by VARCHAR(200), timecards_signed_at TIMESTAMP,
-      timeoff_approved BOOLEAN DEFAULT FALSE,
-      timeoff_signed_by VARCHAR(200), timeoff_signed_at TIMESTAMP,
-      director_closed BOOLEAN DEFAULT FALSE,
-      director_closed_by VARCHAR(200), director_closed_at TIMESTAMP,
-      payroll_closed BOOLEAN DEFAULT FALSE,
-      payroll_closed_by VARCHAR(200), payroll_closed_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(period_start, period_end, center)
-    );
-    CREATE TABLE IF NOT EXISTS payroll_signatures (
-      id SERIAL PRIMARY KEY,
-      period_start DATE NOT NULL, period_end DATE NOT NULL,
-      center VARCHAR(100), action_type VARCHAR(50) NOT NULL,
-      signed_by_user_id INTEGER REFERENCES users(id),
-      signed_by_name VARCHAR(200) NOT NULL,
-      signature_text VARCHAR(500), statement TEXT,
-      created_at TIMESTAMP DEFAULT NOW()
-    );
-  `);
-
-  // Migrations - safe ADD COLUMN IF NOT EXISTS
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_carryover_hours NUMERIC(6,2) DEFAULT 0`);
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_date DATE`);
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS termination_reason TEXT`);
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS terminated_by VARCHAR(200)`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted BOOLEAN DEFAULT FALSE`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted_by VARCHAR(200)`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS timeoff_submitted_at TIMESTAMP`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS payroll_accessed_at TIMESTAMP`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
-  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
-  // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
-  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
-
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS timeoff_change_requests (
-      id SERIAL PRIMARY KEY,
-      employee_id INTEGER REFERENCES employees(id),
-      entry_date DATE NOT NULL,
-      requested_type VARCHAR(1),
-      requested_by INTEGER REFERENCES users(id),
-      requested_by_name VARCHAR(200),
-      reason TEXT,
-      status VARCHAR(20) DEFAULT 'pending',
-      reviewed_by VARCHAR(200),
-      reviewed_at TIMESTAMP,
-      created_at TIMESTAMP DEFAULT NOW()
-    )
-  `);
-
-  // Payroll report archives table
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS payroll_report_archives (
-      id SERIAL PRIMARY KEY,
-      period_start DATE NOT NULL,
-      period_end DATE NOT NULL,
-      pay_date DATE,
-      period_label VARCHAR(200),
-      report_data JSONB NOT NULL,
-      pdf_data BYTEA,
-      generated_by VARCHAR(200),
-      generated_by_user_id INTEGER REFERENCES users(id),
-      notes TEXT,
-      created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(period_start, period_end)
-    )
-  `);
-  await pool.query(`ALTER TABLE payroll_report_archives ADD COLUMN IF NOT EXISTS pdf_data BYTEA`);
-
-  // ─── NEW: Staffing plan migrations for cross-center subs & external persons ───
-  // external_name: for therapists/volunteers not on the employee roster (employee_id will be NULL)
-  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS external_name VARCHAR(200)`);
-  // source_center: when set, indicates this is a cross-center sub reference (live lookup from home center)
-  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS source_center VARCHAR(100)`);
-  // source_employee_id: the employee_id to look up compliance from at the source center
-  // (same as employee_id, but makes intent clear; we use employee_id for the FK)
-  // external_start_date: start date for volunteers/therapists (not linked to employee record)
-  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS external_start_date DATE`);
-  // entry_type: 'staff' (default), 'sub' (cross-center), 'external' (therapist/volunteer)
-  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20) DEFAULT 'staff'`);
-
-  const userCount = await pool.query('SELECT COUNT(*) FROM users');
-  if (parseInt(userCount.rows[0].count) === 0) {
-    const hash = await bcrypt.hash('tcc2026', 10);
-    await pool.query(`
-      INSERT INTO users (username, password_hash, full_name, role, center) VALUES
-      ('mary', $1, 'Mary Wardlaw', 'owner', NULL),
-      ('jared', $1, 'Jared Simkins', 'payroll', NULL),
-      ('amy', $1, 'Amy Gutierrez', 'hr', NULL),
-      ('gabby', $1, 'Gabby Fountain', 'director', 'Peace Boulevard'),
-      ('kirsten', $1, 'Kirsten', 'director', 'Niles'),
-      ('shari', $1, 'Shari', 'director', 'Montessori')
-    `, [hash]);
+    const data = await api('/api/login', { method: 'POST', body: { username, password } });
+    currentUser = data.user;
+    showApp();
+  } catch (e) {
+    document.getElementById('loginError').textContent = 'Invalid username or password';
   }
-
-  console.log('Database initialized');
 }
 
-// ========================
-// AUTH MIDDLEWARE
-// ========================
-function requireAuth(req, res, next) {
-  if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
-  next();
+function doLogout() {
+  api('/api/logout', { method: 'POST' }).finally(() => { currentUser = null; showLogin(); });
 }
-function requireRole(...roles) {
-  return (req, res, next) => {
-    if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
-    if (!roles.includes(req.session.user.role)) return res.status(403).json({ error: 'Access denied' });
-    next();
-  };
+
+function showLogin() {
+  document.getElementById('loginScreen').style.display = 'flex';
+  document.getElementById('app').classList.remove('active');
 }
-function canSeePayRate(user) {
-  return ['owner', 'payroll', 'hr'].includes(user.role);
+
+async function showApp() {
+  document.getElementById('loginScreen').style.display = 'none';
+  document.getElementById('app').classList.add('active');
+  
+  document.getElementById('sidebarName').textContent = currentUser.full_name;
+  document.getElementById('sidebarRole').textContent = currentUser.role;
+  document.getElementById('sidebarCenter').textContent = currentUser.center || 'All Centers';
+  
+  buildNav();
+  
+  // Use smart default pay period based on role
+  try {
+    payPeriod = await api('/api/pay-period/smart-default');
+  } catch(e) {
+    payPeriod = await api('/api/pay-period');
+  }
+  document.getElementById('payPeriodLabel').textContent = payPeriod.label + ' · Pay Date: ' + new Date(payPeriod.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  
+  // Re-render nav now that payPeriod is loaded (so "next report due" date appears)
+  buildNav();
+  
+  await loadEmployees();
+  
+  // Default center selection
+  if (currentUser.role === 'director') {
+    selectedCenter = currentUser.center;
+  } else {
+    selectedCenter = 'Peace Boulevard';
+  }
+  
+  navigate('dashboard');
 }
 
 // ========================
-// PTO CALCULATION HELPERS
+// NAV
 // ========================
-function getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours) {
-  const currentYear = new Date().getFullYear();
-  const yearsEmployed = currentYear - yearHired;
-  let additionalDays = 0;
-  if (isFullTime && weeklyHours >= 35) {
-    if (yearsEmployed >= 5 || isAdmin) {
-      const effectiveYears = Math.max(yearsEmployed, 5);
-      additionalDays = effectiveYears + 6;
-    } else if (yearsEmployed >= 1) {
-      additionalDays = yearsEmployed;
+function buildNav() {
+  const role = currentUser.role;
+  let items = [];
+  
+  if (role === 'director') {
+    // Director: Process Payroll first, then time off calendar, then rest
+    items = [
+      { section: 'Director Payroll Processing' },
+      { id: 'director-payroll', icon: '📋', label: 'Process Payroll', roles: ['director'], showDue: true },
+      { id: 'timeoff-calendar', icon: '📅', label: 'Time Off', roles: ['director'] },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['director'] },
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['director'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['director'] },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['director'] },
+    ];
+  } else if (role === 'hr') {
+    // Amy: Add employee (roster), pay increases, staffing, terminate/archive, roster, time off views, docs
+    items = [
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['hr'] },
+      { id: 'pay-increases', icon: '📈', label: 'Pay Increases', roles: ['hr'] },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['hr'] },
+      { id: 'archive', icon: '📦', label: 'Archive', roles: ['hr'] },
+      { section: 'Time Off' },
+      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['hr'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['hr'] },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['hr'] },
+      { section: 'Other' },
+      { id: 'documents', icon: '📎', label: 'Documents', roles: ['hr'] },
+    ];
+  } else {
+    // Mary & Jared: Payroll processing, pay increases, documents at top, then everything else
+    items = [
+      { section: 'Payroll' },
+      { id: 'payroll', icon: '💰', label: 'Payroll Processing', roles: ['owner','payroll'] },
+      { id: 'pay-increases', icon: '📈', label: 'Pay Increases', roles: ['owner','payroll'] },
+      { id: 'documents', icon: '📎', label: 'Documents', roles: ['owner','payroll'] },
+      { section: 'Staff' },
+      { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['owner','payroll'] },
+      { id: 'employees', icon: '👥', label: 'Employee Roster', roles: ['owner','payroll'] },
+      { id: 'timeoff', icon: '📅', label: 'Enter Time Off', roles: ['owner','payroll'] },
+      { id: 'timeoff-calendar', icon: '🗓️', label: 'Monthly View Time Off', roles: ['owner','payroll'] },
+      { id: 'timeoff-yearly', icon: '📊', label: 'Yearly View Time Off', roles: ['owner','payroll'] },
+      { section: 'Compliance' },
+      { id: 'staffing-plan', icon: '📋', label: 'Staffing Plan', roles: ['owner','payroll'] },
+     { id: 'archive', icon: '📦', label: 'Archive', roles: ['owner','payroll'] },
+      { id: 'payroll-archives', icon: '🗂️', label: 'Payroll Archives', roles: ['owner','payroll'] },
+      { id: 'overtime-view', icon: '⏱️', label: 'Overtime View', roles: ['owner','payroll'] },
+    ];
+    if (role === 'owner') {
+      items.push({ section: 'Settings' });
+      items.push({ id: 'signature', icon: '✍️', label: 'Signature', roles: ['owner'] });
     }
   }
-  const hoursPerDay = weeklyHours >= 40 ? 8 : (weeklyHours / 5);
-  return { additionalDays, additionalHours: additionalDays * hoursPerDay, hoursPerDay, yearsEmployed };
+  
+  let html = '';
+  items.forEach(item => {
+    if (item.section) {
+      html += `<div class="nav-section">${item.section}</div>`;
+      if (item.section === 'Director Payroll Processing') {
+        html += `<div style="padding:4px 20px 8px;font-size:10px;color:var(--gold)">Next report due: <strong>${getNextReportDue()}</strong></div>`;
+      }
+    } else if (item.roles.includes(role)) {
+      html += `<div class="nav-item" data-page="${item.id}" onclick="navigate('${item.id}')">
+        <span class="icon">${item.icon}</span><span>${item.label}</span>
+        ${item.id === 'pay-increases' ? '<span class="badge" id="piCount" style="display:none">0</span>' : ''}
+      </div>`;
+    }
+  });
+  
+  document.getElementById('sidebarNav').innerHTML = html;
 }
 
-function calculatePTOAllowance(yearHired, isFullTime, isAdmin, weeklyHours) {
-  const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
-  return {
-    baseDays: 10, baseHours: 80,
-    additionalDays: tenure.additionalDays, additionalHours: tenure.additionalHours,
-    totalMaxDays: 10 + tenure.additionalDays, totalMaxHours: 80 + tenure.additionalHours,
-    hoursPerDay: tenure.hoursPerDay, yearsEmployed: tenure.yearsEmployed, carryoverCap: 80
+function getNextReportDue() {
+  const pp = dirPayrollPP || payPeriod;
+  if (!pp || !pp.end) return 'loading...';
+  const endDate = new Date(pp.end + 'T12:00:00');
+  let dueDate = new Date(endDate);
+  let bizDays = 0;
+  while (bizDays < 2) {
+    dueDate.setDate(dueDate.getDate() + 1);
+    const dow = dueDate.getDay();
+    if (dow !== 0 && dow !== 6) bizDays++;
+  }
+  return dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function navigate(page) {
+  currentPage = page;
+  closeSidebar(); // Close sidebar on mobile/tablet when navigating
+  document.querySelectorAll('.nav-item').forEach(n => n.classList.toggle('active', n.dataset.page === page));
+  
+  const titles = {
+    'dashboard': 'PTO Summary',
+    'employees': 'Employee Roster',
+    'timeoff': 'Enter Time Off',
+    'timeoff-calendar': currentUser && currentUser.role === 'director' ? 'Time Off' : 'Monthly View Time Off',
+    'timeoff-yearly': 'Yearly View Time Off',
+    'director-payroll': 'Director Payroll Processing',
+    'payroll': 'Payroll Processing',
+    'pay-increases': 'Pay Increase Requests',
+    'documents': 'Document Center',
+    'staffing-plan': 'Staffing Plan',
+    'archive': 'Employee Archive',
+    'signature': 'Signature Settings',     'payroll-archives': 'Payroll Report Archives',     'overtime-view': 'Overtime View'
   };
-}
-
-async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyHours, carryoverHours) {
-  const currentYear = new Date().getFullYear();
-  const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
-  const hoursPerDay = tenure.hoursPerDay;
-  const hoursResult = await pool.query(
-    `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
-    [empId, currentYear]
-  );
-  const totalHoursWorked = parseFloat(hoursResult.rows[0].total_hours);
-  const rawAccruedHours = totalHoursWorked / 20;
-  const accruedHours = Math.min(rawAccruedHours, 80);
-  const tenureBonusHours = tenure.additionalHours;
-  const carryover = Math.min(parseFloat(carryoverHours) || 0, 80);
-  const totalAvailableHours = carryover + accruedHours + tenureBonusHours;
-  const totalAvailableDays = totalAvailableHours / hoursPerDay;
-  const qbUsed = parseFloat(carryoverHours === undefined ? 0 :
-    (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
-  const hoursUsed = qbUsed;
-  const daysUsed = Math.round(hoursUsed / hoursPerDay * 10) / 10;
-  const remainingHours = totalAvailableHours - hoursUsed;
-  const remainingDays = remainingHours / hoursPerDay;
-  const sixMonthsAgo = new Date();
-  sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-  const unpaidResult = await pool.query(
-    `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2`,
-    [empId, sixMonthsAgo.toISOString().split('T')[0]]
-  );
-  const unpaidLast6Months = parseInt(unpaidResult.rows[0].count);
-  return {
-    totalHoursWorked: Math.round(totalHoursWorked * 100) / 100,
-    accruedHours: Math.round(accruedHours * 100) / 100,
-    accruedDays: Math.round((accruedHours / hoursPerDay) * 100) / 100,
-    accrualRate: '1hr per 20hrs worked', accrualCap: 80,
-    tenureBonusDays: tenure.additionalDays,
-    tenureBonusHours: Math.round(tenureBonusHours * 100) / 100,
-    yearsEmployed: tenure.yearsEmployed,
-    carryoverHours: carryover, carryoverDays: Math.round((carryover / hoursPerDay) * 100) / 100,
-    totalAvailableHours: Math.round(totalAvailableHours * 100) / 100,
-    totalAvailableDays: Math.round(totalAvailableDays * 100) / 100,
-    daysUsed, hoursUsed: Math.round(hoursUsed * 100) / 100,
-    remainingHours: Math.round(remainingHours * 100) / 100,
-    remainingDays: Math.round(remainingDays * 100) / 100,
-    unpaidLast6Months, unpaidWarning: unpaidLast6Months > 5,
-    hoursPerDay, isFullTime,
+  document.getElementById('pageTitle').textContent = titles[page] || page;
+  
+  const renderers = {
+    'dashboard': renderDashboard,
+    'employees': renderEmployees,
+    'timeoff': renderTimeOff,
+    'timeoff-calendar': renderTimeOffCalendar,
+    'timeoff-yearly': renderTimeOffYearly,
+    'director-payroll': renderDirectorPayroll,
+    'payroll': renderPayroll,
+    'pay-increases': renderPayIncreases,
+    'documents': renderDocuments,
+    'staffing-plan': renderStaffingPlan,
+    'archive': renderArchive,
+    'signature': renderSignature,     'payroll-archives': renderPayrollArchives,     'overtime-view': renderOvertimeView
   };
+  
+  if (renderers[page]) renderers[page]();
 }
 
-function getPayPeriod(date) {
+// ========================
+// DATA LOADING
+// ========================
+async function loadPayPeriod() {
+  payPeriod = await api('/api/pay-period');
+  document.getElementById('payPeriodLabel').textContent = payPeriod.label + ' · Pay Date: ' + new Date(payPeriod.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+async function loadEmployees() {
+  employees = await api('/api/employees');
+}
+
+// ========================
+// DASHBOARD
+// ========================
+async function renderDashboard() {
+  const el = document.getElementById('pageContent');
+  const totalEmp = employees.length;
+  const centers = {};
+  employees.forEach(e => { centers[e.center] = (centers[e.center] || 0) + 1; });
+  const isDirector = currentUser.role === 'director';
+  
+  // Load pending pay increases count
+  let piCount = 0;
+  if (['owner','payroll','hr'].includes(currentUser.role)) {
+    try {
+      const pis = await api('/api/pay-increases');
+      piCount = pis.filter(p => p.status === 'pending').length;
+      const badge = document.getElementById('piCount');
+      if (badge) { badge.textContent = piCount; badge.style.display = piCount > 0 ? 'inline' : 'none'; }
+    } catch(e) {}
+  }
+  
+  let html = '';
+  
+  // Confidentiality banner for HR
+  if (currentUser.role === 'hr') {
+    html += `<div class="confidentiality-banner">
+      ⚠️ CONFIDENTIAL — Personal information including rate of pay per employee is confidential and should not be discussed with anyone except the employee themselves.
+    </div>`;
+  }
+  
+  html += `<div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-label">Active Employees</div>
+      <div class="stat-value">${totalEmp}</div>
+      <div class="stat-sub">${Object.keys(centers).length} centers</div>
+    </div>
+    <div class="stat-card gold">
+      <div class="stat-label">Pay Period</div>
+      <div class="stat-value" style="font-size:18px">${payPeriod.label}</div>
+      <div class="stat-sub">Pay Date: ${new Date(payPeriod.payDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</div>
+    </div>`;
+  
+  if (['owner','payroll','hr'].includes(currentUser.role)) {
+    html += `<div class="stat-card ${piCount > 0 ? 'red' : 'green'}">
+      <div class="stat-label">Pending Pay Increases</div>
+      <div class="stat-value">${piCount}</div>
+      <div class="stat-sub">${piCount > 0 ? 'Needs attention' : 'All clear'}</div>
+    </div>`;
+  }
+  
+  html += `</div>`;
+  
+  // Center filter tabs with workflow status (for non-directors)
+  if (!isDirector) {
+    // Load workflow status for current pay period
+    let wfStatus = {};
+    try { wfStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`); } catch(e) {}
+    const periods = wfStatus.periods || {};
+    
+    html += `<div class="center-tabs" style="margin-bottom:16px">
+      <div class="center-tab ${dashboardCenter==='all'?'active':''}" onclick="dashboardCenter='all';renderDashboard()">All Centers (${totalEmp})</div>`;
+    CENTERS.forEach(c => {
+      const count = centers[c] || 0;
+      const pp = periods[c] || {};
+      const tcDone = !!pp.timecards_uploaded;
+      const toDone = !!(pp.timeoff_approved || pp.timeoff_submitted);
+      const bothDone = tcDone && toDone;
+      
+      let statusColor, statusText;
+      if (bothDone) {
+        statusColor = 'var(--success)'; statusText = '✅ Completed';
+      } else if (tcDone || toDone) {
+        statusColor = 'var(--warning)'; statusText = '🟡 In Process';
+      } else {
+        statusColor = 'var(--danger)'; statusText = '🔴 Not Started';
+      }
+      
+      html += `<div class="center-tab ${dashboardCenter===c?'active':''}" onclick="dashboardCenter='${c}';renderDashboard()" 
+        style="${dashboardCenter!==c ? 'border-color:'+statusColor+';color:'+statusColor : ''}">
+        ${c} (${count})<br><span style="font-size:9px;font-weight:700">${statusText}</span>
+      </div>`;
+    });
+    html += `</div>`;
+  }
+  
+  // PTO Summary - load actual accrual data
+  html += `<div class="card"><div class="card-header"><h3>PTO Summary — ${isDirector ? currentUser.center : (dashboardCenter === 'all' ? 'All Centers' : dashboardCenter)}</h3>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline btn-sm" onclick="loadPTOSummary()">Refresh</button>
+    </div>
+  </div><div class="card-body">
+    <div id="ptoSummaryArea"><em style="color:var(--gray-400)">Loading PTO data...</em></div>
+  </div></div>`;
+  
+  el.innerHTML = html;
+  loadPTOSummary();
+}
+
+// Dashboard center filter
+let dashboardCenter = 'all';
+
+async function loadPTOSummary() {
+  const area = document.getElementById('ptoSummaryArea');
+  if (!area) return;
+  
+  try {
+    let filtered = employees;
+    if (currentUser.role === 'director') {
+      filtered = employees.filter(e => e.center === currentUser.center);
+    } else if (dashboardCenter !== 'all') {
+      filtered = employees.filter(e => e.center === dashboardCenter);
+    }
+    
+    area.innerHTML = `<em style="color:var(--gray-400)">Loading PTO data for ${filtered.length} employees...</em>`;
+    
+    // Hide Jay & Mary from PTO summary for everyone except Mary
+    if (currentUser.username !== 'mary') {
+      filtered = filtered.filter(e => !isMaryOrJay(e));
+    }
+    
+    // Load detail for ALL employees (no slice limit)
+    const details = [];
+    for (const e of filtered) {
+      try {
+        const d = await api(`/api/employees/${e.id}/detail`);
+        details.push(d);
+      } catch(err) { /* skip inaccessible */ }
+    }
+    
+    let html = `<div style="font-size:11px;color:var(--gray-600);background:var(--gold-pale);padding:10px 14px;border-radius:6px;margin-bottom:12px;line-height:1.6">
+        <strong>How PTO is calculated:</strong> Every employee earns <strong>1 hour of PTO for every 20 hours worked</strong> (max 80 hours/year). 
+        Full-time staff (35+ hrs/wk) also receive <strong>tenure bonus days</strong> per the policy chart (1-4 extra days for years 1-4, jumps to 11+ at year 5). 
+        Hours worked updates each time a Playground timecard CSV is uploaded. <strong>PTO balances update once payroll has been closed out each pay period.</strong>
+      </div>
+      <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>${details.length}</strong> employees</div>
+      <table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Yrs</th><th>Hrs Worked</th><th>PTO Accrued<br><small>(hrs÷20)</small></th><th>Tenure Days<br><small>(policy chart)</small></th><th>Carryover<br><small>(from 2025)</small></th><th>Total Avail</th><th>Used</th><th>Remaining</th><th>Unpaid (6mo)</th>
+    </tr></thead><tbody>`;
+    
+    // Group by center if showing all
+    if (dashboardCenter === 'all' && currentUser.role !== 'director') {
+      details.sort((a,b) => {
+        if (a.center !== b.center) return a.center.localeCompare(b.center);
+        return a.last_name.localeCompare(b.last_name);
+      });
+      let currentCtr = '';
+      details.forEach(e => {
+        if (e.center !== currentCtr) {
+          currentCtr = e.center;
+          html += `<tr style="background:var(--navy);color:white"><td colspan="11" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+        }
+        html += buildPTORow(e);
+      });
+    } else {
+      details.sort((a,b) => a.last_name.localeCompare(b.last_name));
+      details.forEach(e => { html += buildPTORow(e); });
+    }
+    
+    html += `</tbody></table>`;
+    
+    const anyMissingHours = details.some(e => (e.pto?.totalHoursWorked || 0) === 0);
+    if (anyMissingHours) {
+      html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:6px;padding:10px 14px;margin-top:12px;font-size:12px;color:var(--warning)">
+        ⚠️ <strong>Some employees show 0 hours worked.</strong> Upload Playground "Total Staff Hours" or "Daily Staff Hours" CSVs to populate hours data.
+      </div>`;
+    }
+    
+    html += `<div style="font-size:11px;color:var(--gray-400);margin-top:8px">Click any name for full PTO detail with carryover entry</div>`;
+    
+    area.innerHTML = html;
+  } catch(e) {
+    area.innerHTML = `<div style="color:var(--danger)">Error loading PTO data: ${e.message}</div>`;
+  }
+}
+
+function buildPTORow(e) {
+  const p = e.pto || {};
+  const noHoursData = (p.totalHoursWorked || 0) === 0;
+  const warn = (p.remainingHours || 0) <= 0 && !noHoursData;
+  const unpaidWarn = p.unpaidWarning;
+  const hasCarryover = (p.carryoverHours || 0) > 0;
+  return `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
+    <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+    <td>${e.center}</td>
+    <td>${p.yearsEmployed || 0}</td>
+    <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.totalHoursWorked||0).toFixed(1)}</td>
+    <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.accruedHours||0).toFixed(1)+'h'}</td>
+    <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
+    <td style="font-family:'JetBrains Mono',monospace;font-size:11px;${hasCarryover?'color:var(--info);font-weight:600':''}">${hasCarryover ? (p.carryoverHours).toFixed(1)+'h' : '0h'}</td>
+    <td style="font-weight:600">${noHoursData ? '<span style="color:var(--gray-300)">pending</span>' : (p.totalAvailableHours||0).toFixed(1)+'h'}</td>
+    <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)</td>
+    <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.remainingHours||0).toFixed(1)+'h'}</td>
+    <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months}</span>` : (p.unpaidLast6Months||0)}</td>
+  </tr>`;
+}
+
+// ========================
+// 2025 PTO CARRYOVER IMPORT
+// ========================
+function show2025PTOImport() {
+  let html = `<div class="modal-header"><h3>Import 2025 PTO Carryover</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload a CSV or spreadsheet with 2025 PTO usage. The system will calculate how many hours each employee can carry into 2026 (capped at 80 hours).</p>
+      <div style="background:var(--gray-50);border:1px solid var(--gray-200);border-radius:8px;padding:12px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+        <strong>Expected columns:</strong><br>
+        Name (Last, First) or separate Last Name / First Name columns<br>
+        P Days (or "Paid Days" or "PTO Days") — number of paid days used in 2025<br>
+        U Days (or "Unpaid Days") — optional
+      </div>
+      <p style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>Calculation:</strong> 2025 Accrued (hours worked ÷ 20, cap 80h) + Tenure Days - (P Days × 8h) = Remaining → Carryover (cap 80h)</p>
+      <input type="file" id="pto2025File" accept=".csv,.xlsx,.xls" style="margin-bottom:12px">
+      <div id="pto2025Result"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="import2025PTO()">Import & Calculate Carryover</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function import2025PTO() {
+  const fileInput = document.getElementById('pto2025File');
+  const resultDiv = document.getElementById('pto2025Result');
+  if (!fileInput.files[0]) { alert('Select a file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  
+  resultDiv.innerHTML = '<em style="color:var(--gray-400)">Processing...</em>';
+  try {
+    const res = await fetch('/api/pto/import-2025', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    
+    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:12px;margin-bottom:12px;color:#27500A;font-weight:600">
+      Processed ${data.imported} employees. ${data.notFound > 0 ? `<span style="color:var(--warning)">${data.notFound} not found.</span>` : ''}
+    </div>`;
+    
+    html += `<div style="max-height:300px;overflow-y:auto"><table class="data-table" style="font-size:11px"><thead><tr>
+      <th>Name</th><th>2025 Hrs</th><th>Accrued</th><th>Tenure</th><th>Total</th><th>P Days</th><th>Used</th><th>Remaining</th><th>Carryover</th><th>Status</th>
+    </tr></thead><tbody>`;
+    
+    data.results.forEach(r => {
+      if (r.status === 'not_found') {
+        html += `<tr style="background:var(--warning-bg)"><td colspan="10"><strong>${r.name}</strong> — Not found in roster</td></tr>`;
+      } else {
+        html += `<tr>
+          <td><strong>${r.name}</strong></td>
+          <td>${r.hoursWorked2025}</td><td>${r.accrued2025}h</td><td>${r.tenureHours}h</td>
+          <td>${r.totalAvail}h</td><td>${r.pDaysUsed}</td><td>${r.hoursUsed}h</td>
+          <td>${r.remaining}h</td>
+          <td style="font-weight:700;color:var(--info)">${r.carryover}h</td>
+          <td style="color:var(--success)">Set</td>
+        </tr>`;
+      }
+    });
+    html += `</tbody></table></div>`;
+    resultDiv.innerHTML = html;
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
+}
+
+// ========================
+// EMPLOYEES
+// ========================
+async function renderEmployees() {
+  const el = document.getElementById('pageContent');
+  const canEdit = ['owner','hr','payroll'].includes(currentUser.role);
+  const showRate = canSeePayRate();
+  
+  let html = '';
+  
+  if (currentUser.role === 'hr') {
+    html += `<div class="confidentiality-banner">
+      ⚠️ CONFIDENTIAL — Rate of pay per employee is confidential and should not be discussed with anyone except the employee themselves.
+    </div>`;
+  }
+  
+  if (currentUser.role !== 'director') {
+    html += `<div class="center-tabs">
+      <div class="center-tab ${selectedCenter==='all'?'active':''}" onclick="selectedCenter='all';renderEmployees()">All Centers</div>`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderEmployees()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  if (canEdit) {
+    html += `<div style="margin-bottom:16px"><button class="btn btn-primary" onclick="showAddEmployee()">+ Add Employee</button></div>`;
+  }
+  
+  const filtered = employees.filter(e => {
+    if (currentUser.role === 'director') return e.center === currentUser.center;
+    if (selectedCenter !== 'all') return e.center === selectedCenter;
+    return true;
+  });
+  
+  html += `<div class="card"><div class="card-body"><div class="table-scroll">
+    <table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Classroom</th><th>Position</th><th>Year Hired</th><th>Years</th>
+      <th>Schedule</th><th>FT/PT</th><th>PTO Max</th>
+      ${showRate ? '<th>Rate</th>' : ''}
+      <th>Actions</th>
+    </tr></thead><tbody>`;
+  
+  filtered.forEach(e => {
+    const yrs = new Date().getFullYear() - e.year_hired;
+    html += `<tr class="clickable">
+      <td onclick="showEmployeeDetail(${e.id})"><strong>${e.last_name}, ${e.first_name}</strong></td>
+      <td>${e.center}</td>
+      <td style="font-size:11px">${e.classroom || '—'}</td>
+      <td>${e.position || '—'}</td>
+      <td>${e.year_hired}</td>
+      <td>${yrs}</td>
+      <td style="font-size:11px">${e.scheduled_times || '—'}</td>
+      <td><span class="badge ${e.is_full_time ? 'badge-success' : 'badge-info'}">${e.is_full_time ? 'FT' : 'PT'}</span></td>
+      <td>${e.pto.totalMaxDays}</td>
+      ${showRate ? `<td style="font-family:'JetBrains Mono',monospace;font-size:12px">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>` : ''}
+      <td style="white-space:nowrap">
+        <button class="btn btn-outline btn-sm" onclick="showEmployeeDetail(${e.id})">View</button>
+        ${canEdit ? `<button class="btn btn-outline btn-sm" onclick="showEditEmployee(${e.id})">✏️</button>` : ''}
+      </td>
+    </tr>`;
+  });
+  
+  html += `</tbody></table></div></div></div>`;
+  el.innerHTML = html;
+}
+
+function canSeePayRate() {
+  return ['owner','payroll','hr'].includes(currentUser.role);
+}
+
+function showEditEmployee(empId) {
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  const showRate = canSeePayRate();
+  const isDir = currentUser.role === 'director';
+  const isAdmin = ['owner','payroll','hr'].includes(currentUser.role);
+  const ro = isDir ? 'disabled style="background:var(--gray-100);color:var(--gray-400)"' : '';
+  
+  let html = `<div class="modal-header"><h3>Edit Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      ${isDir ? '<div style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Directors can edit classroom, position, and schedule. Other fields are managed by admin.</div>' : ''}
+      <div class="form-row">
+        <div class="form-group"><label>First Name</label><input id="editFirst" value="${emp.first_name}" ${ro}></div>
+        <div class="form-group"><label>Last Name</label><input id="editLast" value="${emp.last_name}" ${ro}></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Center</label><select id="editCenter" ${ro}>
+          ${CENTERS.map(c=>`<option value="${c}"${c===emp.center?' selected':''}>${c}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Classroom</label><input id="editClassroom" value="${emp.classroom||''}" placeholder="e.g. Twos - Bears"></div>
+        <div class="form-group"><label>Position / Role</label><input id="editPosition" value="${emp.position||''}" placeholder="e.g. Lead, Assistant"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Year Hired</label><input id="editYearHired" type="number" value="${emp.year_hired}" ${ro}></div>
+        <div class="form-group"><label>Start Date</label><input id="editStartDate" type="date" value="${emp.start_date ? emp.start_date.split('T')[0] : ''}" ${ro}></div>
+        <div class="form-group"><label>Schedule (M-F)</label><input id="editSchedule" value="${emp.scheduled_times||''}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Weekly Hours</label><input id="editWeeklyHrs" type="number" value="${emp.weekly_hours||40}" ${ro}></div>
+        <div class="form-group"><label>Full-Time?</label><select id="editFT" ${ro}>
+          <option value="true"${emp.is_full_time?' selected':''}>Full-Time (35+ hrs)</option>
+          <option value="false"${!emp.is_full_time?' selected':''}>Part-Time</option>
+        </select></div>
+        ${showRate ? `<div class="form-group"><label>Hourly Rate</label><input id="editRate" type="number" step="0.01" value="${emp.hourly_rate||''}"></div>` : '<div></div>'}
+      </div>
+      ${isAdmin ? `<div class="form-group"><label><input type="checkbox" id="editAdmin"${emp.is_admin?' checked':''}> Administrator / Senior Staff</label></div>` : ''}
+      ${isAdmin ? `<div class="form-row">
+        <div class="form-group">
+          <label>Payroll Location</label>
+          <select id="editPayrollCenter">
+            <option value="">Same as Center (${emp.center})</option>
+            ${CENTERS.map(c => '<option value="' + c + '"' + (emp.payroll_center === c ? ' selected' : '') + '>' + c + '</option>').join('')}
+          </select>
+          <div style="font-size:10px;color:var(--gray-400);margin-top:4px">Which center's payroll report this employee appears on. Only change if their payroll is processed at a different location than where they work.</div>
+        </div>
+      </div>` : ''}
+    </div>
+    <div class="modal-footer" style="justify-content:space-between">
+      ${isAdmin ? `<button class="btn btn-danger btn-sm" onclick="showTerminate(${empId})" style="margin-right:auto">🚫 Terminate Employee</button>` : '<div></div>'}
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEditEmployee(${empId})">Save Changes</button>
+    </div>`;
+  
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function saveEditEmployee(empId) {
+  try {
+    const body = {
+      first_name: document.getElementById('editFirst').value,
+      last_name: document.getElementById('editLast').value,
+      center: document.getElementById('editCenter').value,
+      classroom: document.getElementById('editClassroom').value || null,
+      position: document.getElementById('editPosition').value || null,
+      year_hired: parseInt(document.getElementById('editYearHired').value),
+      start_date: document.getElementById('editStartDate').value || null,
+      scheduled_times: document.getElementById('editSchedule').value || null,
+      weekly_hours: parseFloat(document.getElementById('editWeeklyHrs').value) || 40,
+      is_full_time: document.getElementById('editFT').value === 'true',
+      hourly_rate: document.getElementById('editRate')?.value ? parseFloat(document.getElementById('editRate').value) : null,
+      is_admin: document.getElementById('editAdmin')?.checked || false,
+      is_active: true,
+      payroll_center: document.getElementById('editPayrollCenter')?.value || null,
+    };
+    await api(`/api/employees/${empId}`, { method: 'PUT', body });
+    closeModal();
+    await loadEmployees();
+    renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function showTerminate(empId) {
+  const emp = employees.find(e => e.id === empId);
+  if (!emp) return;
+  
+  let html = `<div class="modal-header"><h3 style="color:var(--danger)">🚫 Terminate Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div style="background:var(--danger-bg);border:1px solid var(--danger);border-radius:8px;padding:14px;margin-bottom:16px">
+        <p style="font-size:14px;font-weight:700;color:var(--danger);margin-bottom:4px">${emp.first_name} ${emp.last_name}</p>
+        <p style="font-size:12px;color:var(--gray-600)">${emp.center} · ${emp.position || ''}</p>
+      </div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">This will remove the employee from the active roster and staffing plan. All their data (hours, PTO, documents, pay history) will be preserved in the archive and accessible to admin users.</p>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">If the employee has hours in a current pay period, they will continue to appear on payroll reports until those hours are processed.</p>
+      <div class="form-group"><label>Termination Date</label><input type="date" id="termDate" value="${new Date().toISOString().split('T')[0]}"></div>
+      <div class="form-group"><label>Reason</label><textarea id="termReason" rows="3" placeholder="Reason for termination (resignation, end of contract, etc.)"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmTerminate(${empId})">Confirm Termination</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function confirmTerminate(empId) {
+  const date = document.getElementById('termDate').value;
+  const reason = document.getElementById('termReason').value;
+  if (!date) return alert('Please enter a termination date.');
+  if (!confirm('Are you sure you want to terminate this employee? This action can be reversed from the Archive.')) return;
+  
+  try {
+    await api(`/api/employees/${empId}/terminate`, { method: 'POST', body: { terminated_date: date, termination_reason: reason } });
+    closeModal();
+    await loadEmployees();
+    renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// ARCHIVE PAGE
+// ========================
+async function renderArchive() {
+  const el = document.getElementById('pageContent');
+  
+  let archived = [];
+  try { archived = await api('/api/employees/archive'); } catch(e) {}
+  
+  let html = `<div class="card"><div class="card-header"><h3>Terminated / Archived Employees (${archived.length})</h3></div><div class="card-body">`;
+  
+  if (archived.length === 0) {
+    html += `<div class="empty-state"><div class="icon">📦</div><p>No archived employees.</p></div>`;
+  } else {
+    html += `<table class="data-table"><thead><tr>
+      <th>Name</th><th>Center</th><th>Position</th><th>Year Hired</th><th>Terminated</th><th>Reason</th><th>By</th><th>YTD Hours</th><th>Actions</th>
+    </tr></thead><tbody>`;
+    
+    archived.forEach(e => {
+      const termDate = e.terminated_date ? fmtDate(e.terminated_date) : '—';
+      html += `<tr>
+        <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+        <td>${e.center}</td>
+        <td>${e.position || '—'}</td>
+        <td>${e.year_hired}</td>
+        <td>${termDate}</td>
+        <td style="font-size:11px;max-width:200px;overflow:hidden;text-overflow:ellipsis">${e.termination_reason || '—'}</td>
+        <td style="font-size:11px">${e.terminated_by || '—'}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${parseFloat(e.ytd_hours || 0).toFixed(1)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="viewArchivedEmployee(${e.id})">View</button>
+          <button class="btn btn-success btn-sm" onclick="reinstateEmployee(${e.id})">Reinstate</button>
+        </td>
+      </tr>`;
+    });
+    
+    html += `</tbody></table>`;
+  }
+  
+  html += `<div style="font-size:11px;color:var(--gray-400);margin-top:12px">
+    Archived employees retain all data (hours, PTO, documents, pay history). 
+    Terminated employees with hours in a pay period still appear on payroll reports until those hours are processed.
+    Click "Reinstate" to return an employee to the active roster.
+  </div></div></div>`;
+  
+  el.innerHTML = html;
+}
+
+async function viewArchivedEmployee(empId) {
+  try {
+    // Use a direct query since the detail endpoint filters inactive
+    const emp = await api(`/api/employees/${empId}/detail`);
+    showEmployeeDetail(empId);
+  } catch(e) {
+    alert('Unable to view archived employee details. The employee may need to be reinstated first.');
+  }
+}
+
+async function reinstateEmployee(empId) {
+  if (!confirm('Reinstate this employee to the active roster?')) return;
+  try {
+    await api(`/api/employees/${empId}/reinstate`, { method: 'POST' });
+    await loadEmployees();
+    renderArchive();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// EMPLOYEE DETAIL MODAL
+// ========================
+async function showEmployeeDetail(id) {
+  const emp = await api(`/api/employees/${id}/detail`);
+  const showRate = canSeePayRate();
+  const yrs = new Date().getFullYear() - emp.year_hired;
+  
+  let html = `<div class="modal-header">
+    <h3>${emp.first_name} ${emp.last_name}</h3>
+    <button class="modal-close" onclick="closeModal()">&times;</button>
+  </div>
+  <div class="modal-body">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
+      <div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Center</div>
+        <div style="font-weight:600">${emp.center}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Position</div>
+        <div style="font-weight:600">${emp.position || '—'}</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Year Hired</div>
+        <div style="font-weight:600">${emp.year_hired} (${yrs} years)</div>
+      </div>
+      <div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Status</div>
+        <div><span class="badge ${emp.is_full_time ? 'badge-success' : 'badge-info'}">${emp.is_full_time ? 'Full-Time' : 'Part-Time'}</span> ${emp.weekly_hours}hrs/wk</div>
+      </div>
+      ${showRate ? `<div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Hourly Rate</div>
+        <div style="font-weight:700;font-family:'JetBrains Mono',monospace">${emp.hourly_rate ? '$'+parseFloat(emp.hourly_rate).toFixed(2) : 'Not set'}</div>
+      </div>` : ''}
+      <div>
+        <div style="font-size:11px;color:var(--gray-400);text-transform:uppercase;letter-spacing:0.5px">Schedule</div>
+        <div style="font-weight:600">${emp.scheduled_times || '—'}</div>
+      </div>
+    </div>
+    
+    <h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">PTO Balance — ${new Date().getFullYear()}</h4>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px">
+      <div style="background:var(--gray-100);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--gray-600);text-transform:uppercase">Carryover</div>
+        <div style="font-size:18px;font-weight:700;color:var(--gray-800)">${emp.pto.carryoverHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs</div>
+      </div>
+      <div style="background:var(--info-bg);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--info);text-transform:uppercase">Accrued</div>
+        <div style="font-size:18px;font-weight:700;color:var(--info)">${emp.pto.accruedHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">of 80 hrs max</div>
+      </div>
+      <div style="background:var(--gold-pale);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--gold);text-transform:uppercase">Tenure Bonus</div>
+        <div style="font-size:18px;font-weight:700;color:var(--navy)">${emp.pto.tenureBonusDays}</div>
+        <div style="font-size:10px;color:var(--gray-400)">days (${emp.pto.tenureBonusHours}h)</div>
+      </div>
+      <div style="background:var(--warning-bg);padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:var(--warning);text-transform:uppercase">Used</div>
+        <div style="font-size:18px;font-weight:700;color:var(--warning)">${emp.pto.hoursUsed}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs (${emp.pto.daysUsed} days)</div>
+      </div>
+      <div style="background:${emp.pto.remainingHours <= 0 ? 'var(--danger-bg)' : 'var(--success-bg)'};padding:12px;border-radius:8px;text-align:center">
+        <div style="font-size:9px;font-weight:600;color:${emp.pto.remainingHours <= 0 ? 'var(--danger)' : 'var(--success)'};text-transform:uppercase">Remaining</div>
+        <div style="font-size:18px;font-weight:700;color:${emp.pto.remainingHours <= 0 ? 'var(--danger)' : 'var(--success)'}">${emp.pto.remainingHours}</div>
+        <div style="font-size:10px;color:var(--gray-400)">hrs (${emp.pto.remainingDays} days)</div>
+      </div>
+    </div>
+    
+    <div style="font-size:11px;color:var(--gray-600);margin-bottom:8px;line-height:1.6">
+      <strong>How this is calculated:</strong><br>
+      Hours worked YTD: <strong>${emp.pto.totalHoursWorked}</strong> ÷ 20 = <strong>${emp.pto.accruedHours} hrs</strong> accrued (cap: 80 hrs)<br>
+      ${emp.pto.tenureBonusDays > 0 ? `Tenure bonus (${emp.pto.yearsEmployed} yrs): <strong>${emp.pto.tenureBonusDays} days</strong> (${emp.pto.tenureBonusHours} hrs at ${emp.pto.hoursPerDay}h/day)<br>` : ''}
+      ${emp.pto.carryoverHours > 0 ? `2025 carryover: <strong>${emp.pto.carryoverHours} hrs</strong><br>` : ''}
+      Total available: <strong>${emp.pto.totalAvailableHours} hrs</strong> (${emp.pto.totalAvailableDays} days)
+    </div>
+    
+    ${emp.pto.unpaidWarning ? `<div style="background:var(--danger-bg);padding:8px 12px;border-radius:6px;font-size:12px;color:var(--danger);font-weight:600;margin-bottom:12px">⚠️ ${emp.pto.unpaidLast6Months} unpaid days in last 6 months — exceeds 5 day limit</div>` : 
+      `<div style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Unpaid days (last 6 months): ${emp.pto.unpaidLast6Months} of 5 max</div>`}
+    
+    ${canSeePayRate() ? `<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">
+      <label style="font-size:11px;font-weight:600;color:var(--gray-600)">2025 Carryover Hours:</label>
+      <input type="number" step="0.5" value="${emp.pto_carryover_hours || 0}" id="carryoverInput" style="width:80px;padding:4px 8px;border:1.5px solid var(--gray-200);border-radius:4px;font-size:13px">
+      <button class="btn btn-outline btn-sm" onclick="saveCarryover(${emp.id})">Save</button>
+    </div>` : ''}`;
+  
+  // OT section
+  html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">Overtime Tracking</h4>
+    <div id="otSection" style="margin-bottom:20px"><em style="color:var(--gray-400);font-size:13px">Loading overtime data...</em></div>`;
+  
+  // Time off entries this year
+  html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">Time Off Entries — ${new Date().getFullYear()}</h4>`;
+  if (emp.timeOffEntries && emp.timeOffEntries.length > 0) {
+    html += `<table class="data-table" style="margin-bottom:20px"><thead><tr><th>Date</th><th>Type</th><th>Notes</th></tr></thead><tbody>`;
+    emp.timeOffEntries.forEach(e => {
+      const dt = new Date(e.entry_date + 'T12:00:00');
+      html += `<tr>
+        <td>${dt.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</td>
+        <td><span class="badge ${e.entry_type==='P'?'badge-info':'badge-danger'}">${e.entry_type==='P'?'Paid':'Unpaid'}</span></td>
+        <td style="font-size:12px">${e.notes||'—'}</td>
+      </tr>`;
+    });
+    html += `</tbody></table>`;
+  } else {
+    html += `<p style="color:var(--gray-400);font-size:13px;margin-bottom:20px">No time off entries this year.</p>`;
+  }
+  
+  // Documents
+  if (emp.documents && emp.documents.length > 0) {
+    html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">Documents</h4>
+      <table class="data-table"><thead><tr><th>Type</th><th>File</th><th>Date</th><th></th></tr></thead><tbody>`;
+    emp.documents.forEach(d => {
+      html += `<tr><td>${d.doc_type}</td><td>${d.file_name}</td><td>${new Date(d.created_at).toLocaleDateString()}</td>
+        <td><a href="/api/documents/${d.id}/download" class="btn btn-outline btn-sm">Download</a></td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  
+  // Pay increase history (HR/payroll/owner only)
+  if (emp.payIncreaseHistory && emp.payIncreaseHistory.length > 0) {
+    html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:20px 0 12px;border-bottom:2px solid var(--gold-pale);padding-bottom:6px">Pay Increase History</h4>
+      <table class="data-table"><thead><tr><th>Date</th><th>Reason</th><th>From</th><th>To</th><th>Status</th></tr></thead><tbody>`;
+    emp.payIncreaseHistory.forEach(pi => {
+      const st = pi.status === 'approved' ? 'badge-success' : pi.status === 'denied' ? 'badge-danger' : 'badge-warning';
+      html += `<tr><td>${new Date(pi.created_at).toLocaleDateString()}</td><td>${pi.reason_category}</td>
+        <td>$${parseFloat(pi.current_rate).toFixed(2)}</td><td>$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+        <td><span class="badge ${st}">${pi.status}</span></td></tr>`;
+    });
+    html += `</tbody></table>`;
+  }
+  
+  html += `</div>`;
+  
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  
+  // Load OT data
+  loadOTData(id);
+}
+
+async function saveCarryover(empId) {
+  const hrs = document.getElementById('carryoverInput').value;
+  try {
+    await api(`/api/employees/${empId}/carryover`, { method: 'POST', body: { carryover_hours: parseFloat(hrs) || 0 } });
+    showEmployeeDetail(empId); // Refresh
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function loadOTData(empId) {
+  try {
+    const data = await api(`/api/overtime/${empId}`);
+    let html = '';
+    if (data.weeks.length === 0) {
+      html = '<em style="color:var(--gray-400);font-size:12px">No daily hours recorded yet for this pay period. Hours will appear after timecard import.</em>';
+    } else {
+      data.weeks.forEach((w, i) => {
+        const hasOT = w.overtimeHours > 0;
+        html += `<div class="ot-week">
+          <div class="week-label">Week of ${new Date(w.monday+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})} — ${new Date(w.sunday+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+          <div class="ot-days">`;
+        w.days.forEach(d => {
+          html += `<div class="ot-day ${d.inPayPeriod ? 'in-period' : 'out-period'}">
+            <div class="day-name">${d.dayName}</div>
+            <div class="day-hrs">${d.hours > 0 ? d.hours.toFixed(1) : '—'}</div>
+          </div>`;
+        });
+        html += `</div>
+          <div class="ot-summary">
+            <span class="regular">Regular: ${w.regularHours.toFixed(1)}h</span>
+            <span class="overtime">${hasOT ? '⚠️ OT: '+w.overtimeHours.toFixed(1)+'h' : 'No OT'}</span>
+            <span style="color:var(--gray-400)">Total: ${w.totalHours.toFixed(1)}h</span>
+          </div>
+        </div>`;
+      });
+    }
+    const otEl = document.getElementById('otSection');
+    if (otEl) otEl.innerHTML = html;
+  } catch(e) {
+    const otEl = document.getElementById('otSection');
+    if (otEl) otEl.innerHTML = '<em style="color:var(--gray-400);font-size:12px">Could not load overtime data.</em>';
+  }
+}
+
+// ========================
+// ADD EMPLOYEE
+// ========================
+function showAddEmployee() {
+  let html = `<div class="modal-header"><h3>Add Employee</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>First Name <span style="color:var(--danger)">*</span></label><input id="empFirst" placeholder="First name" required></div>
+        <div class="form-group"><label>Last Name <span style="color:var(--danger)">*</span></label><input id="empLast" placeholder="Last name" required></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Center <span style="color:var(--danger)">*</span></label><select id="empCenter">
+          ${CENTERS.map(c=>`<option value="${c}">${c}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Position</label><input id="empPosition" placeholder="e.g. Lead, Assistant"></div>
+        <div class="form-group"><label>Year Hired</label><input id="empYearHired" type="number" value="${new Date().getFullYear()}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Start Date <span style="color:var(--danger)">*</span></label><input id="empStartDate" type="date" value="${new Date().toISOString().split('T')[0]}"></div>
+        <div class="form-group"><label>Schedule (M-F)</label><input id="empSchedule" placeholder="e.g. 8am-5pm"></div>
+        <div class="form-group"><label>Weekly Hours</label><input id="empWeeklyHrs" type="number" value="40"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Full-Time?</label><select id="empFT"><option value="true">Full-Time (35+ hrs)</option><option value="false">Part-Time</option></select></div>
+        ${canSeePayRate() ? `<div class="form-group"><label>Hourly Rate <span style="color:var(--danger)">*</span></label><input id="empRate" type="number" step="0.01" placeholder="0.00"></div>` : ''}
+      </div>
+      <div class="form-group"><label><input type="checkbox" id="empAdmin"> Administrator / Senior Staff</label></div>
+      <div style="margin-top:12px;padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
+        <label style="font-size:13px;font-weight:700;color:var(--navy);display:block;margin-bottom:8px">W-4 Form <span style="color:var(--danger)">* Required</span></label>
+        <p style="font-size:11px;color:var(--gray-600);margin-bottom:8px">Upload a photo or scan of the employee's completed W-4 form. This will be included in the payroll report.</p>
+        <input type="file" id="empW4File" accept="image/*,.pdf" style="font-size:13px">
+        <div id="empW4Preview" style="margin-top:8px"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveEmployee()">Add Employee</button>
+    </div>`;
+  
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  
+  // W-4 preview
+  document.getElementById('empW4File').addEventListener('change', function() {
+    const prev = document.getElementById('empW4Preview');
+    if (this.files[0]) {
+      const f = this.files[0];
+      if (f.type.startsWith('image/')) {
+        const url = URL.createObjectURL(f);
+        prev.innerHTML = `<img src="${url}" style="max-width:200px;max-height:150px;border:1px solid var(--gray-200);border-radius:4px">`;
+      } else {
+        prev.innerHTML = `<span style="font-size:12px;color:var(--success)">✅ ${f.name} selected</span>`;
+      }
+    } else { prev.innerHTML = ''; }
+  });
+}
+
+async function saveEmployee() {
+  const firstName = document.getElementById('empFirst').value.trim();
+  const lastName = document.getElementById('empLast').value.trim();
+  const startDate = document.getElementById('empStartDate').value;
+  const w4File = document.getElementById('empW4File').files[0];
+  
+  if (!firstName || !lastName) { alert('First and last name are required.'); return; }
+  if (!startDate) { alert('Start date is required.'); return; }
+  if (!w4File) { alert('W-4 form is required. Please upload a photo or scan of the completed W-4.'); return; }
+  
+  try {
+    // Step 1: Create employee
+    const emp = await api('/api/employees', { method: 'POST', body: {
+      first_name: firstName,
+      last_name: lastName,
+      center: document.getElementById('empCenter').value,
+      position: document.getElementById('empPosition').value,
+      year_hired: parseInt(document.getElementById('empYearHired').value),
+      start_date: startDate,
+      scheduled_times: document.getElementById('empSchedule').value,
+      weekly_hours: parseFloat(document.getElementById('empWeeklyHrs').value),
+      is_full_time: document.getElementById('empFT').value === 'true',
+      hourly_rate: document.getElementById('empRate')?.value ? parseFloat(document.getElementById('empRate').value) : null,
+      is_admin: document.getElementById('empAdmin').checked
+    }});
+    
+    // Step 2: Upload W-4 document
+    const formData = new FormData();
+    formData.append('file', w4File);
+    formData.append('employee_id', emp.id);
+    formData.append('doc_type', 'W-4');
+    formData.append('notes', 'Uploaded with new hire');
+    
+    await fetch('/api/documents', { method: 'POST', body: formData });
+    
+    closeModal();
+    await loadEmployees();
+    renderEmployees();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// TIME OFF - PAY PERIOD VIEW
+// ========================
+async function renderTimeOff() {
+  const el = document.getElementById('pageContent');
+  const isDirector = currentUser.role === 'director';
+  const isPayroll = ['owner','payroll'].includes(currentUser.role);
+  const filtered = isDirector ? employees.filter(e => e.center === currentUser.center) : employees;
+  const center = isDirector ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
+  
+  // Get dates in current pay period
+  const start = new Date(payPeriod.start + 'T12:00:00');
+  const end = new Date(payPeriod.end + 'T12:00:00');
+  const dates = [];
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    dates.push(new Date(d));
+  }
+  
+  // Load time off entries
+  const entries = {};
+  try {
+    const months = new Set();
+    dates.forEach(d => months.add(`${d.getMonth()+1}-${d.getFullYear()}`));
+    for (const my of months) {
+      const [m, y] = my.split('-');
+      const data = await api(`/api/time-off?month=${m}&year=${y}`);
+      data.forEach(e => { entries[`${e.employee_id}-${e.entry_date.split('T')[0]}`] = e; });
+    }
+  } catch(e) {}
+  
+  // Load payroll period status for this center
+  let ppStatus = {};
+  try {
+    const allStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`);
+    ppStatus = (allStatus.periods || {})[center] || {};
+  } catch(e) {}
+  
+  const isSubmitted = !!ppStatus.timeoff_submitted;
+  const isLockedByJared = !!ppStatus.payroll_accessed_at;
+  const changePending = !!ppStatus.change_request_pending;
+  const isEditable = !isSubmitted || (isPayroll);
+  
+  // Center tabs for non-directors
+  let html = '';
+  if (!isDirector) {
+    html += `<div class="center-tabs">`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOff()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  // Status banner
+  if (isSubmitted && !changePending) {
+    html += `<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <span style="font-size:14px;font-weight:700;color:var(--success)">✅ Time Off Report Submitted</span>
+        <span style="font-size:12px;color:var(--gray-600);margin-left:12px">by ${ppStatus.timeoff_submitted_by || 'Director'} on ${ppStatus.timeoff_submitted_at ? new Date(ppStatus.timeoff_submitted_at).toLocaleDateString() : ''}</span>
+      </div>
+      <div>
+      ${isDirector && !isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>` : ''}
+      ${isDirector && isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="requestTimeOffChange()" style="color:var(--warning)">Request Change</button>` : ''}
+      </div>
+    </div>`;
+  }
+  
+  if (changePending) {
+    html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <span style="font-size:14px;font-weight:700;color:var(--warning)">⏳ Change Request Pending</span>
+      <span style="font-size:12px;color:var(--gray-600);margin-left:12px">${ppStatus.change_request_reason || ''}</span>
+      ${isPayroll ? `<div style="margin-top:8px">
+        <button class="btn btn-success btn-sm" onclick="approveTimeOffChange()">Approve (Unlock)</button>
+        <button class="btn btn-outline btn-sm" onclick="denyTimeOffChange()" style="margin-left:8px">Deny</button>
+      </div>` : ''}
+    </div>`;
+  }
+  
+  if (isSubmitted && isLockedByJared && !changePending && isDirector) {
+    html += `<div style="background:var(--gray-100);border:1px solid var(--gray-300);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+      🔒 Payroll processing has begun. To make changes, click "Request Change" above. Jared will need to approve before edits can be made.
+    </div>`;
+  }
+  
+  html += `<div class="card"><div class="card-header"><h3>Time Off — ${payPeriod.label} — ${center}</h3>
+    <div style="font-size:12px;color:var(--gray-400)">${isEditable ? 'Click a cell to toggle: Empty → Paid (P) → Unpaid (U) → Clear' : 'Read-only — report has been submitted'}</div>
+  </div><div class="card-body"><div class="table-scroll">
+    <table class="calendar-grid"><thead><tr><th class="name-col">Employee</th>`;
+  
+  dates.forEach(d => {
+    const dow = d.getDay();
+    const isWknd = dow === 0 || dow === 6;
+    html += `<th${isWknd?' style="background:var(--gray-600)"':''}>${d.toLocaleDateString('en-US',{weekday:'narrow'})} ${d.getDate()}</th>`;
+  });
+  html += `</tr></thead><tbody>`;
+  
+  const centerFiltered = isDirector ? filtered.filter(e => !isAdminStaff(e)) : filtered.filter(e => e.center === center);
+  
+  centerFiltered.forEach(emp => {
+    html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
+    dates.forEach(d => {
+      const ds = d.toISOString().split('T')[0];
+      const dow = d.getDay();
+      const isWknd = dow === 0 || dow === 6;
+      const key = `${emp.id}-${ds}`;
+      const entry = entries[key];
+      
+      let btnClass = 'empty';
+      let btnText = '·';
+      if (entry) {
+        if (entry.entry_type === 'P') { btnClass = 'paid'; btnText = 'P'; }
+        else { btnClass = 'unpaid'; btnText = 'U'; }
+      }
+      
+      if (isEditable) {
+        html += `<td class="${isWknd?'weekend':''}">
+          <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)" title="${emp.first_name} ${emp.last_name} — ${d.toLocaleDateString()}">${btnText}</button>
+        </td>`;
+      } else {
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
+    });
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div>`;
+  
+  // Submit button for directors
+  if (isDirector && !isSubmitted) {
+    html += `<div style="margin-top:20px;padding:20px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:12px">Submit Time Off Report</div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">By typing your full name below, you verify that all paid and unpaid time off entries for this pay period are accurate and complete.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimeOffSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px;white-space:nowrap">✅ Submit & Sign</button>
+      </div>
+    </div>`;
+  }
+  
+  html += `</div></div>`;
+  el.innerHTML = html;
+}
+
+async function submitTimeOff() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
+  
+  const signInput = document.getElementById('dirTimeOffSign');
+  const signName = signInput ? signInput.value.trim() : '';
+  
+  if (!signName) {
+    alert('Please type your full name to verify and sign the time off report.');
+    if (signInput) signInput.focus();
+    return;
+  }
+  
+  if (!confirm('Submit the time off report for ' + center + ' for ' + pp.label + '?\n\nSigned by: ' + signName + '\n\nThis certifies that all time off entries are accurate and complete.')) return;
+  
+  try {
+    await api('/api/payroll-workflow/submit-timeoff', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
+    }});
+    // Also record the signature
+    await api('/api/payroll-workflow/sign-timeoff', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
+    }});
+    if (currentUser.role === 'director') renderDirectorPayroll();
+    else renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function unsubmitTimeOff() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
+  try {
+    const res = await fetch('/api/payroll-workflow/unsubmit-timeoff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period_start: pp.start, period_end: pp.end, center })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      if (data.error === 'locked') {
+        alert('Payroll processing has already begun. Use "Request Change" instead.');
+      } else { alert(data.message || data.error); }
+      return;
+    }
+    if (currentUser.role === 'director') renderDirectorPayroll();
+    else renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function requestTimeOffChange() {
+  const reason = prompt('Describe what needs to change and why:');
+  if (!reason) return;
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
+  try {
+    await api('/api/payroll-workflow/request-timeoff-change', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, reason
+    }});
+    alert('Change request sent. Jared will review and approve or deny.');
+    if (currentUser.role === 'director') renderDirectorPayroll();
+    else renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function approveTimeOffChange() {
+  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  if (!confirm('Approve the change request and unlock time off for editing?')) return;
+  try {
+    await api('/api/payroll-workflow/approve-timeoff-change', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center
+    }});
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function denyTimeOffChange() {
+  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  if (!confirm('Deny this change request?')) return;
+  try {
+    await api('/api/payroll-workflow/deny-timeoff-change', { method: 'POST', body: {
+      period_start: payPeriod.start, period_end: payPeriod.end, center
+    }});
+    renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function toggleTimeOff(empId, date, btn) {
+  // Directors cannot edit dates before system go-live
+  if (currentUser.role === 'director' && date < '2026-03-09') {
+    alert('This date is in a closed pay period. Click the cell to submit a change request instead.');
+    return;
+  }
+  
+  const current = btn.textContent.trim();
+  let newType;
+  
+  if (current === '·' || current === '') {
+    newType = 'P';
+  } else if (current === 'P') {
+    newType = 'U';
+  } else {
+    // Delete entry
+    const key = `${empId}-${date}`;
+    try {
+      // Find the entry to delete (we'd need the id, so we'll use upsert with a special delete approach)
+      // For simplicity, just set to empty via toggling
+      btn.className = 'day-btn empty';
+      btn.textContent = '·';
+      // We'll use a workaround: POST with a special flag or delete via another route
+      // For now, let's just upsert — we'll handle deletion separately
+      const entries = await api(`/api/time-off?month=${new Date(date+'T12:00:00').getMonth()+1}&year=${new Date(date+'T12:00:00').getFullYear()}`);
+      const entry = entries.find(e => e.employee_id === empId && e.entry_date.split('T')[0] === date);
+      if (entry) await api(`/api/time-off/${entry.id}`, { method: 'DELETE' });
+    } catch(e) {}
+    return;
+  }
+  
+  try {
+    await api('/api/time-off', { method: 'POST', body: { employee_id: empId, entry_date: date, entry_type: newType } });
+    btn.className = `day-btn ${newType === 'P' ? 'paid' : 'unpaid'}`;
+    btn.textContent = newType;
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// MONTHLY CALENDAR
+// ========================
+async function renderTimeOffCalendar() {
+  const el = document.getElementById('pageContent');
+  const daysInMonth = new Date(currentYear, currentMonth, 0).getDate();
+  const monthName = new Date(currentYear, currentMonth - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
+  const isDir = currentUser.role === 'director';
+  const isAdmin = ['owner','payroll'].includes(currentUser.role);
+  
+  // Determine if this month is in a past pay period
+  const currentPP = payPeriod || {};
+  const ppStartDate = currentPP.start ? new Date(currentPP.start + 'T12:00:00') : new Date();
+  
+  const filtered = isDir ? employees.filter(e => e.center === currentUser.center) : employees;
+  
+  // Load entries
+  const entries = {};
+  try {
+    const data = await api(`/api/time-off?month=${currentMonth}&year=${currentYear}`);
+    data.forEach(e => { entries[`${e.employee_id}-${e.entry_date.split('T')[0]}`] = e; });
+  } catch(e) {}
+  
+  let html = `<div class="month-nav">
+    <button onclick="changeMonth(-1)">◀</button>
+    <h3>${monthName}</h3>
+    <button onclick="changeMonth(1)">▶</button>
+  </div>`;
+  
+  if (!isDir) {
+    html += `<div class="center-tabs">
+      <div class="center-tab ${selectedCenter==='all'?'active':''}" onclick="selectedCenter='all';renderTimeOffCalendar()">All</div>`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOffCalendar()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  if (isDir) {
+    // Load payroll period status for all periods to determine which are closed
+    let closedPeriods = [];
+    try {
+      // Check current and recent periods
+      const periodsResp = await api(`/api/pay-periods/list`);
+      for (const p of periodsResp) {
+        try {
+          const st = await api(`/api/payroll-period-status?date=${p.start}`);
+          const ctrStatus = (st.periods || {})[currentUser.center] || {};
+          if (ctrStatus.payroll_closed || (ctrStatus.timeoff_submitted && ctrStatus.payroll_accessed_at)) {
+            closedPeriods.push({ start: p.start, end: p.end });
+          }
+        } catch(e2) {}
+      }
+    } catch(e) {}
+    
+    function isDateInClosedPeriod(ds) {
+      return closedPeriods.some(p => ds >= p.start && ds <= p.end);
+    }
+    
+    function isDateInCurrentPP(ds) {
+      return currentPP.start && ds >= currentPP.start && ds <= currentPP.end;
+    }
+    
+    html += `<div style="font-size:12px;color:var(--gray-600);margin-bottom:12px;background:var(--gold-pale);padding:10px 14px;border-radius:6px">
+      <strong>Click a cell</strong> in the current pay period (<strong>${currentPP.start ? new Date(currentPP.start+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''} - ${currentPP.end ? new Date(currentPP.end+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : ''}</strong>) to toggle: Empty → P → U → Clear. 
+      Past closed periods show as read-only — click a cell to request a change.
+    </div>`;
+  } else if (isAdmin) {
+    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">Click a cell to toggle: Empty → P → U → Clear</div>`;
+  } else {
+    html += `<div style="font-size:12px;color:var(--gray-400);margin-bottom:12px">Read-only view.</div>`;
+  }
+  
+  html += `<div class="card"><div class="card-body"><div class="table-scroll">
+    <table class="calendar-grid"><thead><tr><th class="name-col">Last Name</th><th class="name-col" style="min-width:80px">First</th>`;
+  
+  for (let d = 1; d <= daysInMonth; d++) {
+    const dt = new Date(currentYear, currentMonth - 1, d);
+    const dow = dt.getDay();
+    const isWknd = dow === 0 || dow === 6;
+    html += `<th${isWknd?' style="background:var(--gray-600)"':''}>${d}</th>`;
+  }
+  html += `</tr></thead><tbody>`;
+  
+  const calFiltered = filtered.filter(e => selectedCenter === 'all' || e.center === selectedCenter);
+  
+  calFiltered.forEach(emp => {
+    html += `<tr><td class="name-cell">${emp.last_name}</td><td class="name-cell">${emp.first_name}</td>`;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const ds = `${currentYear}-${String(currentMonth).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+      const dt = new Date(currentYear, currentMonth - 1, d);
+      const dow = dt.getDay();
+      const isWknd = dow === 0 || dow === 6;
+      const key = `${emp.id}-${ds}`;
+      const entry = entries[key];
+      
+      let btnClass = 'empty', btnText = '·';
+      if (entry) {
+        btnClass = entry.entry_type === 'P' ? 'paid' : 'unpaid';
+        btnText = entry.entry_type;
+      }
+      
+      if (isAdmin) {
+        // Mary/Jared can edit any period
+        html += `<td class="${isWknd?'weekend':''}">
+          <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
+        </td>`;
+      } else if (isDir) {
+        // Directors: edit current pay period, request changes for past/closed periods
+        // Hard cutoff: everything before March 9, 2026 is locked (system go-live date)
+        const hardCutoff = '2026-03-09';
+        const isBeforeCutoff = ds < hardCutoff;
+        const isClosed = isBeforeCutoff || isDateInClosedPeriod(ds);
+        const isCurrent = !isClosed && isDateInCurrentPP(ds);
+        const isFuture = !isClosed && !isCurrent;
+        
+        if (isCurrent || isFuture) {
+          // Editable - current or future pay period
+          html += `<td class="${isWknd?'weekend':''}${isCurrent?' style="background:rgba(200,150,62,0.08)"':''}">
+            <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)" title="${emp.first_name} ${emp.last_name} — ${dt.toLocaleDateString()}">${btnText}</button>
+          </td>`;
+        } else if (isClosed) {
+          // Closed period - click to request change
+          html += `<td class="${isWknd?'weekend':''}" style="cursor:pointer;background:var(--gray-50)" onclick="requestCalendarChange(${emp.id},'${ds}','${emp.first_name} ${emp.last_name}')" title="Closed period — click to request change">
+            <span style="font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</span>
+          </td>`;
+        } else {
+          // Past but not closed - editable
+          html += `<td class="${isWknd?'weekend':''}">
+            <button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button>
+          </td>`;
+        }
+      } else {
+        // HR: read-only
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
+    }
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div></div></div>`;
+  el.innerHTML = html;
+}
+
+function requestCalendarChange(empId, date, empName) {
+  const emp = employees.find(e => e.id === empId);
+  let html = `<div class="modal-header"><h3>Request Time Off Change</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;margin-bottom:12px"><strong>${empName}</strong> — ${new Date(date+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric'})}</p>
+      <p style="font-size:12px;color:var(--gray-500);margin-bottom:16px">This date is in a past pay period. Your request will be sent to Mary/Jared for approval.</p>
+      <div class="form-group"><label>Change to:</label><select id="crType">
+        <option value="P">Paid (P)</option>
+        <option value="U">Unpaid (U)</option>
+        <option value="">Remove entry</option>
+      </select></div>
+      <div class="form-group"><label>Reason</label><textarea id="crReason" rows="2" placeholder="Why does this need to change?"></textarea></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCalendarChange(${empId},'${date}')">Submit Request</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function submitCalendarChange(empId, date) {
+  const type = document.getElementById('crType').value || null;
+  const reason = document.getElementById('crReason').value;
+  if (!reason) { alert('Please enter a reason.'); return; }
+  try {
+    await api('/api/timeoff-change-request', { method: 'POST', body: { employee_id: empId, entry_date: date, requested_type: type, reason } });
+    closeModal();
+    alert('Change request submitted. Mary/Jared will review it.');
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function changeMonth(dir) {
+  currentMonth += dir;
+  if (currentMonth > 12) { currentMonth = 1; currentYear++; }
+  if (currentMonth < 1) { currentMonth = 12; currentYear--; }
+  renderTimeOffCalendar();
+}
+
+// ========================
+// YEARLY VIEW TIME OFF
+// ========================
+let yearlySortBy = 'name'; // default sort
+
+async function renderTimeOffYearly() {
+  const el = document.getElementById('pageContent');
+  const yr = currentYear;
+  const isDirector = currentUser.role === 'director';
+  
+  let html = '';
+  
+  if (!isDirector) {
+    html += `<div class="center-tabs">
+      <div class="center-tab ${selectedCenter==='all'?'active':''}" onclick="selectedCenter='all';renderTimeOffYearly()">All</div>`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderTimeOffYearly()">${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  // Load all time off entries for the year
+  const allEntries = {};
+  for (let m = 1; m <= 12; m++) {
+    try {
+      const data = await api(`/api/time-off?month=${m}&year=${yr}`);
+      data.forEach(e => {
+        const key = e.employee_id;
+        if (!allEntries[key]) allEntries[key] = { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
+        if (e.entry_type === 'P') allEntries[key].paid[m-1]++;
+        else allEntries[key].unpaid[m-1]++;
+      });
+    } catch(e) {}
+  }
+  
+  let filtered = employees.filter(e => {
+    if (isDirector) return e.center === currentUser.center && !isAdminStaff(e);
+    if (selectedCenter !== 'all') return e.center === selectedCenter;
+    return true;
+  });
+  
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  
+  // Compute totals for sorting
+  const withTotals = filtered.map(emp => {
+    const data = allEntries[emp.id] || { paid: Array(12).fill(0), unpaid: Array(12).fill(0) };
+    return { ...emp, _totalP: data.paid.reduce((a,b)=>a+b,0), _totalU: data.unpaid.reduce((a,b)=>a+b,0), _data: data };
+  });
+  
+  // Sort
+  const sortFn = yearlySortBy === 'totalP' ? (a,b) => b._totalP - a._totalP
+    : yearlySortBy === 'totalU' ? (a,b) => b._totalU - a._totalU
+    : (a,b) => a.last_name.localeCompare(b.last_name);
+  
+  const sorted = [...withTotals].sort((a,b) => {
+    if (selectedCenter === 'all' && a.center !== b.center) return a.center.localeCompare(b.center);
+    return sortFn(a,b);
+  });
+  
+  const sortBtn = (col, label) => `<th style="text-align:center;font-weight:700;cursor:pointer;user-select:none${yearlySortBy===col?';color:var(--gold);text-decoration:underline':''}" onclick="yearlySortBy='${col}';renderTimeOffYearly()">${label} ↕</th>`;
+  
+  html += `<div class="card"><div class="card-header"><h3>Yearly Time Off Summary — ${yr}</h3></div>
+    <div class="card-body"><div class="table-scroll">
+    <table class="data-table" style="font-size:11px">
+      <thead><tr>
+        <th style="min-width:150px;cursor:pointer${yearlySortBy==='name'?';color:var(--gold);text-decoration:underline':''}" onclick="yearlySortBy='name';renderTimeOffYearly()">Name ↕</th><th>Center</th>`;
+  months.forEach(m => { html += `<th style="text-align:center;min-width:55px">${m}</th>`; });
+  html += sortBtn('totalP','Total P') + sortBtn('totalU','Total U') + `</tr></thead><tbody>`;
+  
+  let currentCtr = '';
+  sorted.forEach(emp => {
+    if (selectedCenter === 'all' && emp.center !== currentCtr) {
+      currentCtr = emp.center;
+      html += `<tr style="background:var(--navy);color:white"><td colspan="16" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+    }
+    
+    html += `<tr class="clickable" onclick="showEmployeeDetail(${emp.id})">
+      <td><strong>${emp.last_name}, ${emp.first_name}</strong></td>
+      <td style="font-size:10px">${emp.center}</td>`;
+    
+    for (let m = 0; m < 12; m++) {
+      const p = emp._data.paid[m], u = emp._data.unpaid[m];
+      let cell = '';
+      if (p > 0 && u > 0) cell = `<span style="color:var(--info);font-weight:600">${p}P</span> <span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else if (p > 0) cell = `<span style="color:var(--info);font-weight:600">${p}P</span>`;
+      else if (u > 0) cell = `<span style="color:var(--danger);font-weight:600">${u}U</span>`;
+      else cell = '<span style="color:var(--gray-200)">—</span>';
+      html += `<td style="text-align:center">${cell}</td>`;
+    }
+    
+    html += `<td style="text-align:center;font-weight:700;color:var(--info)">${emp._totalP || '—'}</td>`;
+    html += `<td style="text-align:center;font-weight:700;color:${emp._totalU > 5 ? 'var(--danger)' : 'var(--gray-600)'}">${emp._totalU || '—'}${emp._totalU > 5 ? ' ⚠️' : ''}</td>`;
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div></div></div>`;
+  el.innerHTML = html;
+}
+
+// Helper: check if employee is admin staff (hidden from director time-off screens)
+function isAdminStaff(emp) {
+  const key = (emp.last_name || '').toLowerCase();
+  return ['wardlaw'].includes(key) && ['mary','jay','jared','kelsey'].some(n => (emp.first_name||'').toLowerCase().startsWith(n));
+}
+
+// Helper: check if employee is Mary or Jay Wardlaw (hidden from PTO summary for non-owners)
+function isMaryOrJay(emp) {
+  const ln = (emp.last_name || '').toLowerCase();
+  const fn = (emp.first_name || '').toLowerCase();
+  return ln === 'wardlaw' && (fn.startsWith('mary') || fn.startsWith('jay'));
+}
+
+// ========================
+// DIRECTOR PAYROLL PROCESSING (combined upload + time off)
+// ========================
+// Track which pay period the director is viewing
+let dirPayrollPP = null;
+
+async function renderDirectorPayroll() {
+  const el = document.getElementById('pageContent');
+  const center = currentUser.center;
+  const filtered = employees.filter(e => e.center === center && !isAdminStaff(e));
+  
+  // On first load, check if the previous pay period is incomplete — if so, start there
+  if (!dirPayrollPP) {
+    // Calculate previous pay period
+    const prevDate = new Date(payPeriod.start + 'T12:00:00');
+    prevDate.setDate(prevDate.getDate() - 1);
+    const prevPP = getPayPeriodClient(prevDate);
+    
+    // Check if previous period is incomplete for this center
+    try {
+      const st = await api(`/api/payroll-period-status?date=${prevPP.start}`);
+      const ctrStatus = (st.periods || {})[center] || {};
+      if (!ctrStatus.timecards_uploaded || !ctrStatus.timeoff_submitted) {
+        dirPayrollPP = prevPP; // Previous period is incomplete, start there
+      } else {
+        dirPayrollPP = payPeriod; // Previous is done, show current
+      }
+    } catch(e) {
+      dirPayrollPP = payPeriod;
+    }
+  }
+  
+  const pp = dirPayrollPP;
+  const start = new Date(pp.start + 'T12:00:00');
+  const end = new Date(pp.end + 'T12:00:00');
+  const dates = [];
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) dates.push(new Date(d));
+  
+  // Is this the current pay period?
+  const isCurrent = pp.start === payPeriod.start && pp.end === payPeriod.end;
+  const isPast = new Date(pp.end + 'T12:00:00') < new Date(payPeriod.start + 'T12:00:00');
+  
+  let ppStatus = {};
+  try {
+    const allStatus = await api(`/api/payroll-period-status?date=${pp.start}`);
+    ppStatus = (allStatus.periods || {})[center] || {};
+  } catch(e) {}
+  
+  const isSubmitted = !!ppStatus.timeoff_submitted;
+  const tcUploaded = !!ppStatus.timecards_uploaded;
+  const isLockedByJared = !!ppStatus.payroll_accessed_at;
+  const changePending = !!ppStatus.change_request_pending;
+  const bothComplete = tcUploaded && isSubmitted;
+  const isReadOnly = isPast && bothComplete;
+  
+  // ---- PAY PERIOD NAVIGATION ----
+  let html = `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+    <button class="btn btn-outline btn-sm" onclick="dirChangePP(-1)">◀ Previous Period</button>
+    <div style="text-align:center">
+      <div style="font-size:16px;font-weight:700;color:var(--navy)">${pp.label}</div>
+      <div style="font-size:12px;color:var(--gray-400)">
+        ${isCurrent ? 'Current Period' : isPast ? 'Past Period' : 'Future Period'}
+        ${!isCurrent && !bothComplete ? ' — <span style="color:var(--danger);font-weight:600">INCOMPLETE</span>' : ''}
+        ${isPast && bothComplete ? ' — <span style="color:var(--success)">Completed</span>' : ''}
+        · Next report due: ${getNextReportDueFor(pp.end)}
+      </div>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="dirChangePP(1)">Next Period ▶</button>
+  </div>`;
+  
+  // Read-only banner for completed past periods
+  if (isReadOnly) {
+    html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:12px 16px;margin-bottom:16px;font-size:13px;color:#27500A">
+      ✅ This pay period has been completed. Below is a read-only view of the submitted data.
+    </div>`;
+  }
+  
+  // ---- STEP CARDS ----
+  html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:24px">`;
+  
+  if (tcUploaded) {
+    html += `<div style="background:#EAF3DE;border:2px solid #639922;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#27500A;margin-bottom:4px">STEP 1</div>
+      <div style="font-size:16px;font-weight:500;color:#173404;margin-bottom:8px">Upload daily staff attendance</div>
+      <div style="font-size:12px;color:#3B6D11;margin-bottom:12px">Timecards uploaded for ${pp.label}</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#C0DD97;color:#173404;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Complete</div>
+    </div>`;
+  } else {
+    html += `<div style="background:#FCEBEB;border:2px solid #E24B4A;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#791F1F;margin-bottom:4px">STEP 1</div>
+      <div style="font-size:16px;font-weight:500;color:#501313;margin-bottom:8px">Upload daily staff attendance</div>
+      <div style="font-size:12px;color:#A32D2D;margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <b>${center}</b> for <b>${pp.label}</b></div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#F09595;color:#501313;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Action required</div>
+    </div>`;
+  }
+  
+  if (isSubmitted) {
+    html += `<div style="background:#EAF3DE;border:2px solid #639922;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#27500A;margin-bottom:4px">STEP 2</div>
+      <div style="font-size:16px;font-weight:500;color:#173404;margin-bottom:8px">Enter & submit time off</div>
+      <div style="font-size:12px;color:#3B6D11;margin-bottom:12px">Submitted by ${ppStatus.timeoff_submitted_by||'Director'} on ${ppStatus.timeoff_submitted_at ? new Date(ppStatus.timeoff_submitted_at).toLocaleDateString() : ''}</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#C0DD97;color:#173404;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Complete</div>
+    </div>`;
+  } else {
+    html += `<div style="background:#FCEBEB;border:2px solid #E24B4A;border-radius:12px;padding:1.25rem">
+      <div style="font-size:13px;font-weight:500;color:#791F1F;margin-bottom:4px">STEP 2</div>
+      <div style="font-size:16px;font-weight:500;color:#501313;margin-bottom:8px">Enter & submit time off</div>
+      <div style="font-size:12px;color:#A32D2D;margin-bottom:12px">Review and enter all paid (P) and unpaid (U) time off for this pay period, then submit.</div>
+      <div style="display:inline-flex;align-items:center;gap:6px;background:#F09595;color:#501313;font-size:12px;font-weight:500;padding:4px 12px;border-radius:8px">Action required</div>
+    </div>`;
+  }
+  
+  html += `</div>`;
+  
+  // ---- SECTION 1: Upload Timecards (only if not read-only past period) ----
+  if (!isReadOnly) {
+    html += `<div class="card" style="margin-bottom:20px"><div class="card-header"><h3>Step 1: Upload Daily Staff Attendance</h3></div>
+      <div class="card-body">
+        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${pp.label}</strong>.</p>
+        ${tcUploaded ? '<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:10px 14px;margin-bottom:12px;color:#27500A;font-weight:600">✅ Timecards uploaded for this period</div>' : ''}
+        <input type="file" id="dirTimecardFile" accept=".csv" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="dirUploadTimecard()">Upload & Process</button>
+        <div id="dirTimecardResult" style="margin-top:12px"></div>
+      </div></div>`;
+  }
+  
+  // ---- SECTION 2: Enter Time Off ----
+  const entries = {};
+  try {
+    const months = new Set();
+    dates.forEach(d => months.add(`${d.getMonth()+1}-${d.getFullYear()}`));
+    for (const my of months) {
+      const [m, y] = my.split('-');
+      const data = await api(`/api/time-off?month=${m}&year=${y}`);
+      data.forEach(e => { entries[`${e.employee_id}-${e.entry_date.split('T')[0]}`] = e; });
+    }
+  } catch(e) {}
+  
+  const canEdit = !isSubmitted && !isReadOnly;
+  
+  // Status banners
+  if (isSubmitted && !changePending && !isReadOnly) {
+    html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div><span style="font-weight:700;color:#27500A">✅ Time Off Report Submitted</span>
+        <span style="font-size:12px;color:var(--gray-600);margin-left:12px">by ${ppStatus.timeoff_submitted_by||'Director'}</span></div>
+      <div>
+        ${!isLockedByJared ? '<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>' : ''}
+        ${isLockedByJared ? '<button class="btn btn-outline btn-sm" onclick="requestTimeOffChange()" style="color:var(--warning)">Request Change</button>' : ''}
+      </div>
+    </div>`;
+  }
+  if (changePending) {
+    html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px">
+      <span style="font-weight:700;color:var(--warning)">⏳ Change Request Pending</span>
+      <span style="font-size:12px;color:var(--gray-600);margin-left:12px">${ppStatus.change_request_reason||''}</span>
+    </div>`;
+  }
+  if (isSubmitted && isLockedByJared && !changePending && !isReadOnly) {
+    html += `<div style="background:var(--gray-100);border:1px solid var(--gray-300);border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:12px;color:var(--gray-600)">
+      🔒 Payroll processing has begun. To make changes, click "Request Change" above.
+    </div>`;
+  }
+  
+  html += `<div class="card"><div class="card-header"><h3>Step 2: ${isReadOnly ? 'Time Off' : 'Enter Time Off'} — ${pp.label}</h3>
+    <div style="font-size:12px;color:var(--gray-400)">${canEdit ? 'Click a cell: Empty → P → U → Clear' : 'Read-only'}</div>
+  </div><div class="card-body"><div class="table-scroll">
+    <table class="calendar-grid"><thead><tr><th class="name-col">Employee</th>`;
+  
+  dates.forEach(d => {
+    const dow = d.getDay(); const isWknd = dow === 0 || dow === 6;
+    html += `<th${isWknd?' style="background:var(--gray-600)"':''}>${d.toLocaleDateString('en-US',{weekday:'narrow'})} ${d.getDate()}</th>`;
+  });
+  html += `</tr></thead><tbody>`;
+  
+  filtered.forEach(emp => {
+    html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
+    dates.forEach(d => {
+      const ds = d.toISOString().split('T')[0]; const dow = d.getDay(); const isWknd = dow === 0 || dow === 6;
+      const entry = entries[`${emp.id}-${ds}`];
+      let btnClass = 'empty', btnText = '·';
+      if (entry) { btnClass = entry.entry_type === 'P' ? 'paid' : 'unpaid'; btnText = entry.entry_type; }
+      if (canEdit) {
+        html += `<td class="${isWknd?'weekend':''}"><button class="day-btn ${btnClass}" onclick="toggleTimeOff(${emp.id},'${ds}',this)">${btnText}</button></td>`;
+      } else {
+        html += `<td class="${isWknd?'weekend':''}" style="text-align:center;font-weight:${entry?'700':'400'};color:${btnClass==='paid'?'var(--info)':btnClass==='unpaid'?'var(--danger)':'var(--gray-300)'}">${btnText}</td>`;
+      }
+    });
+    html += `</tr>`;
+  });
+  
+  html += `</tbody></table></div>`;
+  
+  if (canEdit && !isReadOnly) {
+    html += `<div style="margin-top:20px;padding:20px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:15px;font-weight:700;color:var(--navy);margin-bottom:12px">Submit Time Off Report</div>
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">By typing your full name below, you verify that all paid and unpaid time off entries for this pay period (<strong>${pp.label}</strong>) are accurate and complete.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimeOffSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="submitTimeOff()" style="font-size:14px;padding:10px 24px;white-space:nowrap">✅ Submit & Sign</button>
+      </div>
+      <div style="font-size:11px;color:var(--gray-400);margin-top:8px">Once submitted, Jared can begin processing payroll. You can unsubmit if payroll processing hasn't started yet.</div>
+    </div>`;
+  }
+  
+  html += `</div></div>`;
+  el.innerHTML = html;
+}
+
+function getNextReportDueFor(endDate) {
+  if (!endDate) return '...';
+  const ed = new Date(endDate + 'T12:00:00');
+  let dueDate = new Date(ed);
+  let bizDays = 0;
+  while (bizDays < 2) { dueDate.setDate(dueDate.getDate() + 1); if (dueDate.getDay() !== 0 && dueDate.getDay() !== 6) bizDays++; }
+  return dueDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function dirChangePP(dir) {
+  // Navigate to previous/next pay period
+  const current = dirPayrollPP || payPeriod;
+  const d = new Date(current.start + 'T12:00:00');
+  if (dir === -1) {
+    d.setDate(d.getDate() - 1); // go to last day of previous period
+  } else {
+    d.setDate(d.getDate() + 16); // jump into next period
+  }
+  dirPayrollPP = getPayPeriodClient(d);
+  renderDirectorPayroll();
+}
+
+// Client-side pay period calculation (mirrors server getPayPeriod)
+function getPayPeriodClient(date) {
   const d = date || new Date();
   const day = d.getDate();
   const month = d.getMonth();
   const year = d.getFullYear();
-  let start, end, payDate;
+  
+  let periodStart, periodEnd, payDate;
   if (day >= 9 && day <= 23) {
-    start = new Date(year, month, 9);
-    end = new Date(year, month, 23);
-    let nextMonth = month + 1; let payYear = year;
-    if (nextMonth > 11) { nextMonth = 0; payYear++; }
-    payDate = new Date(payYear, nextMonth, 1);
+    periodStart = new Date(year, month, 9);
+    periodEnd = new Date(year, month, 23);
+    const nextMonth = month === 11 ? 0 : month + 1;
+    const nextYear = month === 11 ? year + 1 : year;
+    payDate = new Date(nextYear, nextMonth, 1);
   } else {
     if (day >= 24) {
-      start = new Date(year, month, 24);
-      let nextMonth = month + 1; let endYear = year;
-      if (nextMonth > 11) { nextMonth = 0; endYear++; }
-      end = new Date(endYear, nextMonth, 8);
-      payDate = new Date(endYear, nextMonth, 15);
+      periodStart = new Date(year, month, 24);
+      const nextMonth = month === 11 ? 0 : month + 1;
+      const nextYear = month === 11 ? year + 1 : year;
+      periodEnd = new Date(nextYear, nextMonth, 8);
+      payDate = new Date(nextYear, nextMonth, 15);
     } else {
-      let prevMonth = month - 1; let startYear = year;
-      if (prevMonth < 0) { prevMonth = 11; startYear--; }
-      start = new Date(startYear, prevMonth, 24);
-      end = new Date(year, month, 8);
+      const prevMonth = month === 0 ? 11 : month - 1;
+      const prevYear = month === 0 ? year - 1 : year;
+      periodStart = new Date(prevYear, prevMonth, 24);
+      periodEnd = new Date(year, month, 8);
       payDate = new Date(year, month, 15);
     }
   }
-  const payDay = payDate.getDay();
-  if (payDay === 6) payDate.setDate(payDate.getDate() - 1);
-  if (payDay === 0) payDate.setDate(payDate.getDate() + 1);
-  return {
-    start: start.toISOString().split('T')[0],
-    end: end.toISOString().split('T')[0],
-    payDate: payDate.toISOString().split('T')[0],
-    label: `${start.toLocaleDateString('en-US', {month:'short',day:'numeric'})} - ${end.toLocaleDateString('en-US', {month:'short',day:'numeric',year:'numeric'})}`
-  };
+  
+  // Adjust pay date for weekends
+  while (payDate.getDay() === 0 || payDate.getDay() === 6) payDate.setDate(payDate.getDate() - 1);
+  
+  const fmt = (dt) => dt.toISOString().split('T')[0];
+  const label = periodStart.toLocaleDateString('en-US',{month:'short',day:'numeric'}) + ' – ' + periodEnd.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+  
+  return { start: fmt(periodStart), end: fmt(periodEnd), payDate: fmt(payDate), label };
 }
 
-function getMonToSunWeeks(startDate, endDate) {
-  const start = new Date(startDate);
-  const end = new Date(endDate);
-  const weeks = [];
-  let monday = new Date(start);
-  const startDay = monday.getDay();
-  const daysToMonday = startDay === 0 ? 6 : startDay - 1;
-  monday.setDate(monday.getDate() - daysToMonday);
-  while (monday <= end) {
-    const sunday = new Date(monday);
-    sunday.setDate(sunday.getDate() + 6);
-    weeks.push({ monday: monday.toISOString().split('T')[0], sunday: sunday.toISOString().split('T')[0] });
-    monday = new Date(monday); monday.setDate(monday.getDate() + 7);
-  }
-  return weeks;
-}
-
-function getSunSatWeeks(startDate, endDate) {
-  const start = new Date(startDate + 'T12:00:00');
-  const end = new Date(endDate + 'T12:00:00');
-  const weeks = [];
-  let sunday = new Date(start);
-  const startDay = sunday.getDay();
-  sunday.setDate(sunday.getDate() - startDay);
-  while (sunday <= end) {
-    const saturday = new Date(sunday);
-    saturday.setDate(saturday.getDate() + 6);
-    weeks.push({ sunday: sunday.toISOString().split('T')[0], saturday: saturday.toISOString().split('T')[0] });
-    sunday = new Date(sunday); sunday.setDate(sunday.getDate() + 7);
-  }
-  return weeks;
-}
-
-// ========================
-// API ROUTES
-// ========================
-
-// Auth
-app.post('/api/login', async (req, res) => {
+async function dirUploadTimecard() {
+  const fileInput = document.getElementById('dirTimecardFile');
+  const resultDiv = document.getElementById('dirTimecardResult');
+  if (!fileInput.files[0]) { alert('Select a CSV file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  formData.append('center', currentUser.center);
+  
+  resultDiv.innerHTML = '<em style="color:var(--gray-400)">Uploading and processing...</em>';
   try {
-    const { username, password } = req.body;
-    const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
-    if (result.rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
-    const user = result.rows[0];
-    const valid = await bcrypt.compare(password, user.password_hash);
-    if (!valid) return res.status(401).json({ error: 'Invalid credentials' });
-    req.session.user = { id: user.id, username: user.username, full_name: user.full_name, role: user.role, center: user.center };
-    res.json({ user: req.session.user });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.post('/api/logout', (req, res) => { req.session.destroy(); res.json({ ok: true }); });
-app.get('/api/me', (req, res) => {
-  if (!req.session.user) return res.status(401).json({ error: 'Not authenticated' });
-  res.json({ user: req.session.user });
-});
-
-// Pay period info
-app.get('/api/pay-period', requireAuth, (req, res) => {
-  const dateStr = req.query.date;
-  const date = dateStr ? new Date(dateStr + 'T12:00:00') : new Date();
-  res.json(getPayPeriod(date));
-});
-
-const ADMIN_HIDDEN_FROM_HR = ['wardlaw_jay','wardlaw_mary','swem_kirsten','wardlaw_kelsey','wardlaw_jared','phillips_shari','fountain_gabrielle'];
-function shouldHideFromUser(emp, user) {
-  if (user.role === 'owner' || user.role === 'payroll') return false;
-  const empKey = `${emp.last_name.toLowerCase()}_${emp.first_name.toLowerCase()}`;
-  if (user.role === 'hr') {
-    if (empKey.includes('gutierrez') && empKey.includes('amy')) return false;
-    return ADMIN_HIDDEN_FROM_HR.some(h => empKey.startsWith(h.split('_')[0]) && empKey.includes(h.split('_')[1]));
-  }
-  return false;
-}
-
-// Employees
-app.get('/api/employees', requireAuth, async (req, res) => {
-  try {
-    const user = req.session.user;
-    let query = 'SELECT * FROM employees WHERE is_active = TRUE ORDER BY last_name, first_name';
-    let params = [];
-    if (user.role === 'director') {
-      query = 'SELECT * FROM employees WHERE is_active = TRUE AND center = $1 ORDER BY last_name, first_name';
-      params = [user.center];
+    const res = await fetch('/api/import-timecard', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    
+    let html = '';
+    
+    // ---- UNMATCHED NAMES WARNING (prominent, before success) ----
+    if (data.unmatchedNames && data.unmatchedNames.length > 0) {
+      html += `<div style="background:var(--danger-bg);border:2px solid var(--danger);border-radius:8px;padding:16px;margin-top:12px">
+        <div style="font-size:15px;font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ ${data.unmatchedNames.length} Name(s) Not Found in Roster</div>
+        <p style="font-size:13px;color:var(--navy);margin-bottom:12px">The following names from the Playground CSV do not match any active employee on the roster. Their hours were <strong>NOT imported</strong>.</p>
+        <div style="margin-bottom:12px">
+          ${data.unmatchedNames.map(n => '<div style="padding:6px 12px;background:white;border-radius:6px;margin-bottom:4px;font-weight:600;display:flex;align-items:center;gap:8px"><span style="color:var(--danger)">✕</span> ' + n + '</div>').join('')}
+        </div>
+        <div style="font-size:13px;color:var(--navy);padding:12px;background:white;border-radius:6px;border-left:4px solid var(--warning)">
+          <strong>What to do:</strong>
+          <div style="margin-top:6px">1. <strong>Check with Amy (HR)</strong> — Has this person been terminated? If they still work here, they may need to be <strong>reinstated</strong> in this app before payroll can be processed.</div>
+          <div style="margin-top:4px">2. <strong>Check the name spelling</strong> — The first and last name in the <strong>Playground app must match the roster name</strong> in Payroll Hub exactly. If someone goes by a nickname or has a different spelling in Playground, the roster name or Playground name needs to be updated to match.</div>
+          <div style="margin-top:4px">3. Once resolved, <strong>re-upload the CSV</strong> to capture their hours.</div>
+        </div>
+      </div>`;
     }
-    const result = await pool.query(query, params);
-    let employees = result.rows;
-    employees = employees.filter(e => !shouldHideFromUser(e, user));
-    if (user.username !== 'mary' && user.username !== 'jared') {
-      employees = employees.filter(e => {
-        const ln = (e.last_name || '').toLowerCase();
-        const fn = (e.first_name || '').toLowerCase();
-        if (ln === 'wardlaw' && (fn.startsWith('mary') || fn.startsWith('jay'))) return false;
-        return true;
-      });
+    
+    // ---- SUCCESS SUMMARY ----
+    html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-top:12px">
+      <div style="font-weight:700;color:#27500A;margin-bottom:6px">✅ Upload Complete</div>
+      <div style="font-size:13px;color:#3B6D11">Processed ${data.imported} timecard rows — ${data.matched} matched to employees, ${data.savedDays} daily hour records saved.</div>
+    </div>`;
+    
+    // Show daily hours summary grid
+    const pp = dirPayrollPP || payPeriod;
+    const center = currentUser.center;
+    const centerEmps = employees.filter(e => e.center === center && !isAdminStaff(e));
+    
+    // Build date range for the pay period
+    const startD = new Date(pp.start + 'T12:00:00');
+    const endD = new Date(pp.end + 'T12:00:00');
+    const ppDates = [];
+    for (let d = new Date(startD); d <= endD; d.setDate(d.getDate() + 1)) ppDates.push(new Date(d));
+    
+    // Load daily hours for all employees in this period
+    const hoursData = {};
+    for (const emp of centerEmps) {
+      try {
+        const ot = await api(`/api/overtime/${emp.id}?date=${pp.start}`);
+        if (ot.weeks) {
+          ot.weeks.forEach(w => {
+            w.days.forEach(day => {
+              if (day.inPayPeriod && day.hours > 0) {
+                if (!hoursData[emp.id]) hoursData[emp.id] = {};
+                hoursData[emp.id][day.date] = day.hours;
+              }
+            });
+          });
+        }
+      } catch(e) {}
     }
-    if (!canSeePayRate(user)) {
-      employees = employees.map(e => { const { hourly_rate, ...rest } = e; return rest; });
-    }
-    employees = employees.map(e => ({
-      ...e,
-      pto: calculatePTOAllowance(e.year_hired, e.is_full_time, e.is_admin, parseFloat(e.weekly_hours) || 40)
-    }));
-    res.json(employees);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/employees', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin } = req.body;
-    const result = await pool.query(
-      `INSERT INTO employees (first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
-      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time || true, weekly_hours || 40, hourly_rate, is_admin || false]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/employees/:id', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const { first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, payroll_center } = req.body;
-    const result = await pool.query(
-      `UPDATE employees SET first_name=$1, last_name=$2, center=$3, classroom=$4, position=$5, year_hired=$6, start_date=$7, scheduled_times=$8, is_full_time=$9, weekly_hours=$10, hourly_rate=$11, is_admin=$12, is_active=$13, pto_carryover_hours=COALESCE($14, pto_carryover_hours), payroll_center=$16
-       WHERE id=$15 RETURNING *`,
-      [first_name, last_name, center, classroom, position, year_hired, start_date, scheduled_times, is_full_time, weekly_hours, hourly_rate, is_admin, is_active, pto_carryover_hours, req.params.id, payroll_center || null]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/employees/:id/carryover', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
-  try {
-    const { carryover_hours } = req.body;
-    const result = await pool.query(
-      `UPDATE employees SET pto_carryover_hours = $1 WHERE id = $2 RETURNING id, first_name, last_name, pto_carryover_hours`,
-      [parseFloat(carryover_hours) || 0, req.params.id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/employees/:id/terminate', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const { terminated_date, termination_reason } = req.body;
-    const user = req.session.user;
-    const result = await pool.query(
-      `UPDATE employees SET is_active = FALSE, terminated_date = $1, termination_reason = $2, terminated_by = $3 WHERE id = $4 RETURNING *`,
-      [terminated_date, termination_reason, user.full_name, req.params.id]
-    );
-    await pool.query('DELETE FROM staffing_plan WHERE employee_id = $1', [req.params.id]);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/employees/:id/reinstate', requireRole('owner', 'hr'), async (req, res) => {
-  try {
-    const result = await pool.query(
-      `UPDATE employees SET is_active = TRUE, terminated_date = NULL, termination_reason = NULL, terminated_by = NULL WHERE id = $1 RETURNING *`,
-      [req.params.id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/employees/archive', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT e.*, COALESCE((SELECT SUM(dh.hours_worked) FROM daily_hours dh WHERE dh.employee_id = e.id AND EXTRACT(YEAR FROM dh.work_date) = EXTRACT(YEAR FROM NOW())), 0) as ytd_hours
-       FROM employees e WHERE e.is_active = FALSE ORDER BY e.terminated_date DESC NULLS LAST, e.last_name`
-    );
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/employees/:id/detail', requireAuth, async (req, res) => {
-  try {
-    const user = req.session.user;
-    const emp = await pool.query('SELECT * FROM employees WHERE id = $1', [req.params.id]);
-    if (emp.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    let employee = emp.rows[0];
-    if (user.role === 'director' && employee.center !== user.center) return res.status(403).json({ error: 'Access denied' });
-    if (shouldHideFromUser(employee, user)) return res.status(403).json({ error: 'Access denied' });
-    if (!canSeePayRate(user)) delete employee.hourly_rate;
-    employee.pto = await calculateActualPTO(employee.id, employee.year_hired, employee.is_full_time, employee.is_admin, parseFloat(employee.weekly_hours) || 40, employee.pto_carryover_hours || 0);
-    const year = new Date().getFullYear();
-    const entries = await pool.query(`SELECT * FROM time_off_entries WHERE employee_id = $1 AND EXTRACT(YEAR FROM entry_date) = $2 ORDER BY entry_date`, [req.params.id, year]);
-    employee.timeOffEntries = entries.rows;
-    const increases = await pool.query(`SELECT pir.*, u.full_name as requested_by_name FROM pay_increase_requests pir LEFT JOIN users u ON pir.requested_by = u.id WHERE pir.employee_id = $1 ORDER BY pir.created_at DESC`, [req.params.id]);
-    if (canSeePayRate(user)) employee.payIncreaseHistory = increases.rows;
-    const docs = await pool.query(`SELECT id, doc_type, file_name, notes, affects_pay_period, created_at FROM documents WHERE employee_id = $1 ORDER BY created_at DESC`, [req.params.id]);
-    employee.documents = docs.rows;
-    res.json(employee);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Time off entries
-app.get('/api/time-off', requireAuth, async (req, res) => {
-  try {
-    const user = req.session.user;
-    const { month, year, center } = req.query;
-    let query = `SELECT toe.*, e.first_name, e.last_name, e.center, e.classroom FROM time_off_entries toe JOIN employees e ON toe.employee_id = e.id WHERE EXTRACT(MONTH FROM toe.entry_date) = $1 AND EXTRACT(YEAR FROM toe.entry_date) = $2`;
-    let params = [month || new Date().getMonth() + 1, year || new Date().getFullYear()];
-    if (user.role === 'director') { query += ' AND e.center = $3'; params.push(user.center); }
-    else if (center) { query += ' AND e.center = $3'; params.push(center); }
-    query += ' ORDER BY e.last_name, e.first_name, toe.entry_date';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/time-off', requireAuth, async (req, res) => {
-  try {
-    const { employee_id, entry_date, entry_type, notes } = req.body;
-    const user = req.session.user;
-    if (user.role === 'director') {
-      const currentPP = getPayPeriod(new Date());
-      const entryD = new Date(entry_date + 'T12:00:00');
-      const ppStart = new Date(currentPP.start + 'T12:00:00');
-      if (entryD < ppStart) return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods. Submit a change request.' });
-    }
-    const result = await pool.query(
-      `INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes) VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT (employee_id, entry_date) DO UPDATE SET entry_type = $3, notes = $5, entered_by = $4 RETURNING *`,
-      [employee_id, entry_date, entry_type, req.session.user.id, notes]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
-  try {
-    if (req.session.user.role === 'director') {
-      const entry = await pool.query('SELECT entry_date FROM time_off_entries WHERE id = $1', [req.params.id]);
-      if (entry.rows.length > 0) {
-        const currentPP = getPayPeriod(new Date());
-        const entryD = new Date(entry.rows[0].entry_date);
-        const ppStart = new Date(currentPP.start + 'T12:00:00');
-        if (entryD < ppStart) return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods.' });
-      }
-    }
-    await pool.query('DELETE FROM time_off_entries WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Time off change requests
-app.post('/api/timeoff-change-request', requireAuth, async (req, res) => {
-  try {
-    const { employee_id, entry_date, requested_type, reason } = req.body;
-    const user = req.session.user;
-    await pool.query(`INSERT INTO timeoff_change_requests (employee_id, entry_date, requested_type, requested_by, requested_by_name, reason) VALUES ($1, $2, $3, $4, $5, $6)`,
-      [employee_id, entry_date, requested_type, user.id, user.full_name, reason]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/timeoff-change-requests', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT cr.*, e.first_name, e.last_name, e.center FROM timeoff_change_requests cr JOIN employees e ON cr.employee_id = e.id WHERE cr.status = 'pending' ORDER BY cr.created_at DESC`);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/timeoff-change-requests/:id/approve', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const cr = await pool.query('SELECT * FROM timeoff_change_requests WHERE id = $1', [req.params.id]);
-    if (cr.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    const r = cr.rows[0];
-    if (r.requested_type) {
-      await pool.query(`INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes) VALUES ($1, $2, $3, $4, 'Approved change request')
-         ON CONFLICT (employee_id, entry_date) DO UPDATE SET entry_type = $3, notes = 'Approved change request'`,
-        [r.employee_id, r.entry_date, r.requested_type, req.session.user.id]);
-    } else {
-      await pool.query('DELETE FROM time_off_entries WHERE employee_id = $1 AND entry_date = $2', [r.employee_id, r.entry_date]);
-    }
-    await pool.query(`UPDATE timeoff_change_requests SET status = 'approved', reviewed_by = $1, reviewed_at = NOW() WHERE id = $2`, [req.session.user.full_name, req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    await pool.query(`UPDATE timeoff_change_requests SET status = 'denied', reviewed_by = $1, reviewed_at = NOW() WHERE id = $2`, [req.session.user.full_name, req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// QuickBooks payroll summary upload
-app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
-  try {
-    const XLSX = require('xlsx');
-    const wb = XLSX.read(req.file.buffer);
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    const skipTypes = new Set(['Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions','Health Insurance','Salary','Bonus','']);
-    let currentName = null;
-    const ptoPaid = {};
-    let dateRange = '';
-    for (let i = 0; i < data.length; i++) {
-      const row = data[i];
-      const col0 = String(row[0] || '').trim();
-      const col1 = String(row[1] || '').trim();
-      const col2 = parseFloat(row[2]) || 0;
-      if (col0.startsWith('From ')) dateRange = col0;
-      if (col0 && col0.includes(',') && col1 === 'Gross') currentName = col0;
-      if (currentName && col1 && !skipTypes.has(col1) && col2 > 0) {
-        if (!ptoPaid[currentName]) ptoPaid[currentName] = 0;
-        ptoPaid[currentName] += col2;
-      }
-    }
-    for (const name of Object.keys(ptoPaid)) { if (ptoPaid[name] > 200) delete ptoPaid[name]; }
-    let matched = 0;
-    const results = [];
-    for (const [name, hours] of Object.entries(ptoPaid)) {
-      const parts = name.split(',').map(s => s.trim());
-      if (parts.length < 2) continue;
-      const last = parts[0]; const first = parts[1].split(' ')[0];
-      const emp = await pool.query(
-        `SELECT id, first_name, last_name, pto_hours_used_qb FROM employees WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%') AND LOWER(first_name) LIKE LOWER($2) || '%' AND is_active = TRUE LIMIT 1`,
-        [last, first]);
-      if (emp.rows.length > 0) {
-        const e = emp.rows[0];
-        const newTotal = parseFloat(e.pto_hours_used_qb || 0) + hours;
-        await pool.query('UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2', [newTotal, e.id]);
-        results.push({ name: `${e.last_name}, ${e.first_name}`, hours, newTotal });
-        matched++;
-      } else { results.push({ name, hours, newTotal: null, error: 'Not found' }); }
-    }
-    res.json({ dateRange, totalEmployeesWithPTO: Object.keys(ptoPaid).length, matched, results });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Pay increase requests
-app.get('/api/pay-increases', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const result = await pool.query(`SELECT pir.*, e.first_name, e.last_name, e.center, u.full_name as requested_by_name, rv.full_name as reviewed_by_name FROM pay_increase_requests pir JOIN employees e ON pir.employee_id = e.id LEFT JOIN users u ON pir.requested_by = u.id LEFT JOIN users rv ON pir.reviewed_by = rv.id ORDER BY pir.status = 'pending' DESC, pir.created_at DESC`);
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/pay-increases', requireRole('owner', 'hr'), async (req, res) => {
-  try {
-    const { employee_id, reason_category, reason_detail, current_rate, proposed_rate } = req.body;
-    const result = await pool.query(
-      `INSERT INTO pay_increase_requests (employee_id, requested_by, reason_category, reason_detail, current_rate, proposed_rate) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [employee_id, req.session.user.id, reason_category, reason_detail, current_rate, proposed_rate]);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/pay-increases/:id', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { status, review_notes } = req.body;
-    const result = await pool.query(`UPDATE pay_increase_requests SET status = $1, review_notes = $2, reviewed_by = $3, reviewed_at = NOW() WHERE id = $4 RETURNING *`,
-      [status, review_notes, req.session.user.id, req.params.id]);
-    if (status === 'approved') {
-      const req2 = result.rows[0];
-      await pool.query('UPDATE employees SET hourly_rate = $1 WHERE id = $2', [req2.proposed_rate, req2.employee_id]);
-    }
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Document uploads
-app.post('/api/documents', requireAuth, upload.single('file'), async (req, res) => {
-  try {
-    const { employee_id, doc_type, notes, affects_pay_period } = req.body;
-    const fileData = fs.readFileSync(req.file.path);
-    const result = await pool.query(
-      `INSERT INTO documents (employee_id, doc_type, file_name, file_data, notes, uploaded_by, affects_pay_period)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, doc_type, file_name, notes, affects_pay_period, created_at`,
-      [employee_id, doc_type, req.file.originalname, fileData, notes, req.session.user.id, affects_pay_period]);
-    fs.unlinkSync(req.file.path);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/documents/:id/download', requireAuth, async (req, res) => {
-  try {
-    const result = await pool.query('SELECT file_name, file_data FROM documents WHERE id = $1', [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.setHeader('Content-Disposition', `attachment; filename="${result.rows[0].file_name}"`);
-    res.send(result.rows[0].file_data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Parse "X hrs Y min" to decimal hours
-function parseHoursMinutes(str) {
-  if (!str) return 0;
-  const m = str.match(/(\d+)\s*hrs?\s*(\d+)\s*min/i);
-  if (m) return parseInt(m[1]) + parseInt(m[2]) / 60;
-  // Also handle plain "X min" (no hours)
-  const minOnly = str.match(/(\d+)\s*min/i);
-  if (minOnly) return parseInt(minOnly[1]) / 60;
-  // Also handle plain "X hrs" (no minutes)
-  const hrsOnly = str.match(/(\d+)\s*hrs?/i);
-  if (hrsOnly) return parseInt(hrsOnly[1]);
-  return 0;
-}
-// Backwards-compatible alias
-function parseBillableHours(str) { return parseHoursMinutes(str); }
-
-// CSV Timecard import — Billable hours = actual payable hours
-// Cross-center support: if a name doesn't match the uploading center, check other centers
-app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), upload.single('file'), async (req, res) => {
-  try {
-    const results = [];
-    let fileContent = fs.readFileSync(req.file.path, 'utf8');
-    if (fileContent.charCodeAt(0) === 0xFEFF) fileContent = fileContent.substring(1);
-    fs.writeFileSync(req.file.path, fileContent, 'utf8');
-    await new Promise((resolve, reject) => {
-      fs.createReadStream(req.file.path).pipe(csv())
-        .on('data', (data) => {
-          const clean = {};
-          for (const [k, v] of Object.entries(data)) clean[k.replace(/^\uFEFF/, '').trim()] = v;
-          results.push(clean);
-        })
-        .on('end', resolve).on('error', reject);
+    
+    html += `<div style="margin-top:16px"><div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:8px">Daily Hours Summary — ${pp.label}</div>
+      <div class="table-scroll"><table class="data-table" style="font-size:11px">
+      <thead><tr><th style="min-width:140px">Employee</th>`;
+    
+    ppDates.forEach(d => {
+      const dow = d.getDay();
+      const isWknd = dow === 0 || dow === 6;
+      html += `<th style="text-align:center;min-width:45px${isWknd?';background:var(--gray-100)':''}">${d.toLocaleDateString('en-US',{weekday:'narrow'})} ${d.getMonth()+1}/${d.getDate()}</th>`;
     });
-    fs.unlinkSync(req.file.path);
-    let matched = 0, unmatched = 0, totalRows = 0;
-    const unmatchedNames = new Set();
-    const crossCenterStaff = []; // staff found at OTHER centers
-    const dailySummary = {};
-    const crossCenterHours = {}; // keyed by empId, holds pending hours from other centers
-    for (const row of results) {
-      const lastName = (row['Last Name'] || '').trim();
-      const firstName = (row['First Name'] || '').trim();
-      const dateStr = (row['Date'] || '').trim();
-      const billable = (row['Billable'] || '').trim();
-      if (!lastName || !dateStr) continue;
-      totalRows++;
-      const hours = parseBillableHours(billable);
-      const dateParts = dateStr.split('/');
-      if (dateParts.length !== 3) continue;
-      const isoDate = `${dateParts[2]}-${dateParts[0].padStart(2,'0')}-${dateParts[1].padStart(2,'0')}`;
-      // Try to match to any active employee (not just this center)
-      const emp = await pool.query(
-        `SELECT id, first_name, last_name, center, COALESCE(payroll_center, center) as payroll_center FROM employees WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%' OR LOWER(last_name) LIKE '%' || LOWER($1) || '%') AND (LOWER(first_name) = LOWER($2) OR LOWER(first_name) LIKE LOWER($2) || '%') AND is_active = TRUE LIMIT 1`,
-        [lastName, firstName]);
-      if (emp.rows.length > 0) {
-        const empId = emp.rows[0].id;
-        const key = `${empId}-${isoDate}`;
-        dailySummary[key] = (dailySummary[key] || 0) + hours;
-        matched++;
-      } else { unmatched++; unmatchedNames.add(`${lastName}, ${firstName}`); }
-    }
-    let savedDays = 0;
-    for (const [key, hours] of Object.entries(dailySummary)) {
-      const firstDash = key.indexOf('-');
-      const eid = key.substring(0, firstDash);
-      const dt = key.substring(firstDash + 1);
-      await pool.query(`INSERT INTO daily_hours (employee_id, work_date, hours_worked, source) VALUES ($1, $2, $3, 'import') ON CONFLICT (employee_id, work_date) DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
-        [parseInt(eid), dt, Math.round(hours * 100) / 100]);
-      savedDays++;
-    }
-    const preview = results.slice(0, 40).map(r => ({
-      name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
-      date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
-      breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
-      hours: parseBillableHours((r['Billable']||'').trim()).toFixed(2)
-    }));
-    res.json({
-      imported: totalRows, matched, unmatched,
-      unmatchedNames: [...unmatchedNames], savedDays, preview,
-      payPeriod: getPayPeriod(new Date())
-    });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Daily hours for OT tracking (per-employee)
-app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
-  try {
-    const payPeriod = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const weeks = getMonToSunWeeks(payPeriod.start, payPeriod.end);
-    const allDates = [];
-    weeks.forEach(w => {
-      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
-        allDates.push(d.toISOString().split('T')[0]);
-    });
-    if (allDates.length === 0) return res.json({ weeks: [], payPeriod });
-    const hours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2) ORDER BY work_date`, [req.params.employeeId, allDates]);
-    const hoursMap = {};
-    hours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
-    const weekDetails = weeks.map(w => {
-      let totalHours = 0;
-      const days = [];
-      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
+    html += `<th style="text-align:center;font-weight:700;min-width:55px">Total</th></tr></thead><tbody>`;
+    
+    centerEmps.sort((a,b) => a.last_name.localeCompare(b.last_name));
+    centerEmps.forEach(emp => {
+      const empHours = hoursData[emp.id] || {};
+      let total = 0;
+      html += `<tr><td><strong>${emp.last_name}, ${emp.first_name.charAt(0)}.</strong></td>`;
+      ppDates.forEach(d => {
         const ds = d.toISOString().split('T')[0];
-        const h = hoursMap[ds] || 0;
-        totalHours += h;
-        const inPayPeriod = ds >= payPeriod.start && ds <= payPeriod.end;
-        days.push({ date: ds, hours: h, inPayPeriod, dayName: d.toLocaleDateString('en-US', { weekday: 'short' }) });
-      }
-      return { ...w, days, totalHours, regularHours: Math.min(totalHours, 40), overtimeHours: Math.max(0, totalHours - 40) };
-    });
-    res.json({ weeks: weekDetails, payPeriod });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Overtime View (all employees)
-app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const centerFilter = req.query.center || null;
-    const weeks = getMonToSunWeeks(pp.start, pp.end);
-    const allDates = [];
-    weeks.forEach(w => {
-      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
-        allDates.push(d.toISOString().split('T')[0]);
-    });
-    if (allDates.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
-    let empQuery = 'SELECT id, first_name, last_name, center, position FROM employees WHERE is_active = TRUE';
-    let empParams = [];
-    if (centerFilter) { empQuery += ' AND center = $1'; empParams.push(centerFilter); }
-    empQuery += ' ORDER BY center, last_name, first_name';
-    const empsResult = await pool.query(empQuery, empParams);
-    const empIds = empsResult.rows.map(e => e.id);
-    if (empIds.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
-    const hoursResult = await pool.query(
-      `SELECT employee_id, work_date, hours_worked FROM daily_hours WHERE employee_id = ANY($1) AND work_date = ANY($2)`,
-      [empIds, allDates]
-    );
-    const hoursLookup = {};
-    hoursResult.rows.forEach(h => {
-      const eid = h.employee_id;
-      const ds = h.work_date.toISOString().split('T')[0];
-      if (!hoursLookup[eid]) hoursLookup[eid] = {};
-      hoursLookup[eid][ds] = parseFloat(h.hours_worked);
-    });
-    const employeeData = [];
-    for (const emp of empsResult.rows) {
-      const empHours = hoursLookup[emp.id] || {};
-      let totalInPeriod = 0, totalOT = 0;
-      const weekBreakdown = [];
-      for (const w of weeks) {
-        let weekTotal = 0, weekInPeriod = 0;
-        const days = [];
-        for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
-          const ds = d.toISOString().split('T')[0];
-          const h = empHours[ds] || 0;
-          weekTotal += h;
-          const inPP = ds >= pp.start && ds <= pp.end;
-          if (inPP) weekInPeriod += h;
-          days.push({ date: ds, hours: h, inPayPeriod: inPP, dayName: d.toLocaleDateString('en-US', { weekday: 'short' }) });
-        }
-        const weekOT = Math.max(0, weekTotal - 40);
-        totalInPeriod += weekInPeriod;
-        totalOT += weekOT;
-        weekBreakdown.push({ monday: w.monday, sunday: w.sunday, days, weekTotal, weekInPeriod, regularHours: Math.min(weekTotal, 40), overtimeHours: weekOT });
-      }
-      const hasAnyHours = Object.keys(empHours).length > 0;
-      employeeData.push({
-        id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.center, position: emp.position, weeks: weekBreakdown,
-        inPeriodHours: Math.round(totalInPeriod * 100) / 100,
-        totalOT: Math.round(totalOT * 100) / 100, hasOT: totalOT > 0, hasHours: hasAnyHours
+        const dow = d.getDay();
+        const isWknd = dow === 0 || dow === 6;
+        const h = empHours[ds] || 0;
+        total += h;
+        html += `<td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px${isWknd?';background:var(--gray-50)':''}${h>8?';color:var(--danger);font-weight:700':''}">${h > 0 ? h.toFixed(1) : '<span style="color:var(--gray-200)">—</span>'}</td>`;
       });
-    }
-    res.json({ employees: employeeData, payPeriod: pp, weeks });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ========================
-// STAFFING PLAN
-// ========================
-app.get('/api/staffing-plan', requireAuth, async (req, res) => {
-  try {
-    const user = req.session.user;
-    let query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
-      FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
-      ORDER BY sp.center, sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
-    let params = [];
-    if (user.role === 'director') {
-      query = `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
-        FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
-        WHERE sp.center = $1
-        ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`;
-      params = [user.center];
-    }
-    const result = await pool.query(query, params);
-
-    // For cross-center subs (entry_type='sub'), do live lookup of compliance from home center
-    const enriched = [];
-    for (const row of result.rows) {
-      if (row.entry_type === 'sub' && row.source_center && row.employee_id) {
-        // Live lookup: find the home center staffing_plan entry for this employee
-        const homeEntry = await pool.query(
-          `SELECT orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher,
-                  ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement,
-                  last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training
-           FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND (entry_type IS NULL OR entry_type = 'staff') LIMIT 1`,
-          [row.employee_id, row.source_center]
-        );
-        if (homeEntry.rows.length > 0) {
-          const h = homeEntry.rows[0];
-          // Overlay home center compliance data onto the sub entry
-          row.orientation_date = h.orientation_date;
-          row.cpr_first_aid_date = h.cpr_first_aid_date;
-          row.health_safety_abc_date = h.health_safety_abc_date;
-          row.health_safety_refresher = h.health_safety_refresher;
-          row.ccbc_consent_date = h.ccbc_consent_date;
-          row.fingerprinting_date = h.fingerprinting_date;
-          row.date_eligible = h.date_eligible;
-          row.abuse_neglect_statement = h.abuse_neglect_statement;
-          row.last_evaluation = h.last_evaluation;
-          row.date_promoted_lead = h.date_promoted_lead;
-          row.date_assigned_room = h.date_assigned_room;
-          row.education = h.education;
-          row.semester_hours = h.semester_hours;
-          row.infant_toddler_training = h.infant_toddler_training;
-        }
-      }
-      // For external entries, use external_name as first_name/last_name
-      if (row.entry_type === 'external' && !row.employee_id && row.external_name) {
-        const parts = row.external_name.split(' ');
-        row.first_name = parts[0] || '';
-        row.last_name = parts.slice(1).join(' ') || '';
-        row.emp_start_date = row.external_start_date;
-      }
-      enriched.push(row);
-    }
-
-    res.json(enriched);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/staffing-plan', requireRole('owner', 'hr', 'director'), async (req, res) => {
-  try {
-    const d = req.body;
-    const result = await pool.query(
-      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher, ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement, last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training, external_name, source_center, external_start_date, entry_type)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22) RETURNING *`,
-      [d.employee_id || null, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, d.external_name || null, d.source_center || null, d.external_start_date || null, d.entry_type || 'staff']);
-    if (d.employee_id && d.entry_type !== 'sub') await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async (req, res) => {
-  try {
-    const d = req.body;
-    const result = await pool.query(
-      `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18, external_name=$19, source_center=$20, external_start_date=$21, entry_type=$22 WHERE id=$23 RETURNING *`,
-      [d.employee_id || null, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, d.external_name || null, d.source_center || null, d.external_start_date || null, d.entry_type || 'staff', req.params.id]);
-    if (d.employee_id && d.entry_type !== 'sub') await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.delete('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async (req, res) => {
-  try {
-    await pool.query('DELETE FROM staffing_plan WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── NEW: Get employees from OTHER centers for cross-center sub pull ─────────
-app.get('/api/staffing-plan/available-subs/:center', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const targetCenter = decodeURIComponent(req.params.center);
-    // Get all active employees NOT from the target center
-    const emps = await pool.query(
-      `SELECT e.id, e.first_name, e.last_name, e.center, e.position, e.start_date, e.scheduled_times,
-              e.classroom
-       FROM employees e
-       WHERE e.is_active = TRUE AND e.center != $1
-       ORDER BY e.center, e.last_name, e.first_name`,
-      [targetCenter]
-    );
-
-    // Check which ones already have a sub entry at the target center
-    const existingSubs = await pool.query(
-      `SELECT employee_id FROM staffing_plan WHERE center = $1 AND entry_type = 'sub'`,
-      [targetCenter]
-    );
-    const existingIds = new Set(existingSubs.rows.map(r => r.employee_id));
-
-    const available = emps.rows.map(e => ({
-      ...e,
-      already_added: existingIds.has(e.id)
-    }));
-
-    res.json(available);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── NEW: Pull a sub from another center (creates sub entry with live lookup) ──
-app.post('/api/staffing-plan/pull-sub', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const { employee_id, target_center, classroom } = req.body;
-
-    // Get the employee's home center
-    const emp = await pool.query('SELECT id, first_name, last_name, center FROM employees WHERE id = $1', [employee_id]);
-    if (emp.rows.length === 0) return res.status(404).json({ error: 'Employee not found' });
-    const homeCenter = emp.rows[0].center;
-
-    if (homeCenter === target_center) return res.status(400).json({ error: 'Employee already belongs to this center' });
-
-    // Check if already added as sub at target center
-    const existing = await pool.query(
-      `SELECT id FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND entry_type = 'sub'`,
-      [employee_id, target_center]
-    );
-    if (existing.rows.length > 0) return res.status(400).json({ error: 'Employee is already listed as a sub at this center' });
-
-    // Create sub entry — compliance dates will be looked up live from home center
-    const result = await pool.query(
-      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, source_center, entry_type)
-       VALUES ($1, $2, $3, 'Sub', $4, 'sub') RETURNING *`,
-      [employee_id, target_center, classroom || 'Subs from other centers', homeCenter]
-    );
-
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── NEW: Add external person (therapist/volunteer) ──────────────────────────
-app.post('/api/staffing-plan/add-external', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
-  try {
-    const { external_name, center, classroom, role_in_room, fingerprinting_date, date_eligible, abuse_neglect_statement, external_start_date } = req.body;
-
-    if (!external_name || !external_name.trim()) return res.status(400).json({ error: 'Name is required' });
-
-    const result = await pool.query(
-      `INSERT INTO staffing_plan (employee_id, center, classroom, role_in_room, external_name, entry_type,
-       fingerprinting_date, date_eligible, abuse_neglect_statement, external_start_date)
-       VALUES (NULL, $1, $2, $3, $4, 'external', $5, $6, $7, $8) RETURNING *`,
-      [center, classroom, role_in_room || '', external_name.trim(), fingerprinting_date || null, date_eligible || null, abuse_neglect_statement || null, external_start_date || null]
-    );
-
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── UPDATE: Printable staffing plan — handle subs (live lookup) and externals ──
-app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
-  try {
-    const center = decodeURIComponent(req.params.center);
-    const spData = await pool.query(
-      `SELECT sp.*, e.first_name, e.last_name, e.start_date as emp_start_date, e.scheduled_times as emp_schedule, e.center as emp_home_center
-       FROM staffing_plan sp LEFT JOIN employees e ON sp.employee_id = e.id
-       WHERE sp.center = $1
-       ORDER BY sp.classroom, CASE sp.role_in_room WHEN 'Co-Lead' THEN 1 WHEN 'Lead' THEN 2 WHEN 'Assistant' THEN 3 WHEN 'Caregiver' THEN 4 WHEN 'Floater' THEN 5 ELSE 6 END`,
-      [center]);
-
-    // Enrich sub entries with live compliance data
-    for (const row of spData.rows) {
-      if (row.entry_type === 'sub' && row.source_center && row.employee_id) {
-        const homeEntry = await pool.query(
-          `SELECT orientation_date, cpr_first_aid_date, health_safety_abc_date, health_safety_refresher,
-                  ccbc_consent_date, fingerprinting_date, date_eligible, abuse_neglect_statement,
-                  last_evaluation, date_promoted_lead, date_assigned_room, education, semester_hours, infant_toddler_training
-           FROM staffing_plan WHERE employee_id = $1 AND center = $2 AND (entry_type IS NULL OR entry_type = 'staff') LIMIT 1`,
-          [row.employee_id, row.source_center]
-        );
-        if (homeEntry.rows.length > 0) {
-          const h = homeEntry.rows[0];
-          Object.assign(row, h);
-        }
-      }
-      if (row.entry_type === 'external' && !row.employee_id && row.external_name) {
-        const parts = row.external_name.split(' ');
-        row.first_name = parts[0] || '';
-        row.last_name = parts.slice(1).join(' ') || '';
-        row.emp_start_date = row.external_start_date;
-      }
-    }
-
-    const seen = new Set();
-    const rows = spData.rows.filter(r => {
-      // For externals, use id as key (no employee_id)
-      const key = r.employee_id ? `emp-${r.employee_id}-${r.entry_type || 'staff'}` : `sp-${r.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+      html += `<td style="text-align:center;font-weight:700;font-family:'JetBrains Mono',monospace;font-size:11px${total>80?';color:var(--danger)':''}">${total > 0 ? total.toFixed(1) : '—'}</td>`;
+      html += `</tr>`;
     });
-    const sig = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
-    const sigData = sig.rows[0];
-    const licenseNum = center === 'Montessori' ? 'DC110278344' : 'DC110415511';
-    const centerFull = center === 'Montessori' ? 'Montessori Children\'s Center' : `The Children's Center - ${center}`;
-    function fd(d) { if (!d) return ''; const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d); const m = s.match(/(\d{4})-(\d{2})-(\d{2})/); return m ? parseInt(m[2])+'/'+parseInt(m[3])+'/'+m[1].slice(2) : ''; }
-    const classrooms = {};
-    rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
     
-    // Use center-specific template to determine which classrooms to show and their order
-    const peaceTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','Dinos (GSRP)','Penguins (GSRP)','School-Agers'];
-    const nilesTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','GSRP-1','GSRP-2','Strong Beginnings','School-Agers'];
-    const montessoriTemplate = ['GSRP Orange','GSRP Blue','GSRP Pink'];
-    const centerRooms = center === 'Niles' ? nilesTemplate : center === 'Montessori' ? montessoriTemplate : peaceTemplate;
-    const bottomSections = ['Admin / Office / Food Prep', 'Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
+    html += `</tbody></table></div></div>`;
     
-    // Only show template classrooms + bottom sections, in order
-    const orderedClassrooms = [...centerRooms, ...bottomSections].filter(c => classrooms[c] && classrooms[c].length > 0 || bottomSections.includes(c) || centerRooms.includes(c));
-    let tableRows = '';
-    for (const cls of orderedClassrooms) {
-      const staff = classrooms[cls] || [];
-      tableRows += `<tr class="section"><td colspan="19">${cls}</td></tr>`;
-      staff.forEach(s => {
-        const nameDisplay = (s.first_name||'')+' '+(s.last_name||'');
-        const homeTag = s.entry_type === 'sub' && s.source_center ? ` <span style="font-size:5pt;color:#888">(${s.source_center})</span>` : '';
-        const extTag = s.entry_type === 'external' ? ` <span style="font-size:5pt;color:#888">(ext)</span>` : '';
-        tableRows += `<tr><td>${s.role_in_room||''}</td><td class="name">${nameDisplay}${homeTag}${extTag}</td><td>${fd(s.emp_start_date)}</td><td>${s.emp_schedule||''}</td><td>${fd(s.orientation_date)}</td><td>${fd(s.cpr_first_aid_date)}</td><td>${fd(s.health_safety_abc_date)}</td><td>${fd(s.health_safety_refresher)}</td><td>${fd(s.ccbc_consent_date)}</td><td>${fd(s.fingerprinting_date)}</td><td>${fd(s.date_eligible)}</td><td>${fd(s.abuse_neglect_statement)}</td><td>${fd(s.last_evaluation)}</td><td>${fd(s.date_promoted_lead)}</td><td>${fd(s.date_assigned_room)}</td><td>${s.education||''}</td><td>${s.semester_hours||''}</td><td>${s.infant_toddler_training||''}</td></tr>`;
-      });
-    }
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Staffing Plan — ${centerFull}</title><style>@page{size:landscape;margin:0.3in}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;font-size:7pt;color:#1B2A4A}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #C8963E}.header h1{font-size:11pt;font-weight:700}.header .sub{font-size:7pt;color:#666}.header .sig{text-align:right}.header .sig img{height:25px}table{width:100%;border-collapse:collapse;font-size:6.5pt}th{background:#1B2A4A;color:white;padding:2px 3px;text-align:left;font-weight:600;font-size:6pt;white-space:nowrap}td{padding:2px 3px;border-bottom:0.5px solid #ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}td.name{font-weight:600;max-width:100px}tr.section td{background:#1B2A4A;color:white;font-weight:700;font-size:7pt;padding:3px 5px}tr:nth-child(even):not(.section){background:#f8f9fa}.resp-row{font-size:5.5pt;color:#888;margin-bottom:2px}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body><div class="header"><div><h1>Staffing Plan</h1><div class="sub">${centerFull} · License #${licenseNum}</div><div class="sub">All Staff and Unsupervised Volunteers · ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</div></div><div class="sig"><div class="sub">Mary Wardlaw, Licensee</div>${sigData?.value ? `<img src="${sigData.value}"><div class="sub">${new Date(sigData.updated_at).toLocaleDateString()}</div>` : ''}</div></div><div class="resp-row">Responsible: Program Director completes Name, Start Date, Schedule, Evaluations, Promoted, Room Assigned · Amy (Dir. Professional Development) completes Orientation, CPR, H&S, CCBC, Fingerprint, Eligible, Abuse/Neglect, Education, Hours, I/T Training</div><table><thead><tr><th>Role</th><th>Name</th><th>Start</th><th>Schedule</th><th>Orient.</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Ref.</th><th>CCBC</th><th>Fingerpr.</th><th>Eligible</th><th>Abuse/Neg.</th><th>Last Eval</th><th>Promoted</th><th>Room Asgn</th><th>Education</th><th>Hrs/CEUs</th><th>I/T Training</th></tr></thead><tbody>${tableRows}</tbody></table><div style="margin-top:12px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #ccc;padding-top:8px"><div style="flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Licensee Signature:</div>${sigData?.value ? '<img src="' + sigData.value + '" style="height:30px;margin-bottom:2px"><br><span style="font-size:6pt;color:#999">Digital signature on file</span>' : '<div style="border-bottom:1px solid #333;width:250px;height:25px;margin-bottom:2px"></div><span style="font-size:6pt;color:#999">Sign here</span>'}</div><div style="text-align:center;flex:1"><div style="font-size:7pt;font-weight:600">Mary Wardlaw, Licensee</div></div><div style="text-align:right;flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Date:</div>${sigData?.value ? '<span style="font-size:8pt">' + new Date(sigData.updated_at).toLocaleDateString() + '</span>' : '<div style="border-bottom:1px solid #333;width:150px;height:20px;display:inline-block"></div>'}</div></div><script>window.onload=function(){window.print()}</script></body></html>`;
-    res.send(html);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+    // Signature verification to complete Step 1
+    html += `<div style="margin-top:16px;padding:16px;border:2px solid var(--gold);border-radius:12px;background:rgba(200,150,62,0.05)">
+      <div style="font-size:14px;font-weight:700;color:var(--navy);margin-bottom:8px">Verify & Sign Attendance Upload</div>
+      <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">By typing your full name below, you verify that the uploaded daily staff attendance report has been reviewed and is accurate.</p>
+      <div style="display:flex;align-items:flex-end;gap:12px">
+        <div style="flex:1">
+          <label style="font-size:12px;font-weight:600;color:var(--gray-600);display:block;margin-bottom:4px">Type your full name to sign</label>
+          <input id="dirTimecardSign" placeholder="Full name" style="width:100%;padding:10px 14px;border:1.5px solid var(--gray-300);border-radius:8px;font-size:14px">
+        </div>
+        <button class="btn btn-primary" onclick="signTimecardUpload()" style="padding:10px 20px;white-space:nowrap">✅ Verify & Complete</button>
+      </div>
+    </div>`;
+    
+    resultDiv.innerHTML = html;
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger);font-weight:600;padding:12px">Error: ${e.message}</div>`; }
+}
 
-// Signature storage
-app.post('/api/settings/signature', requireRole('owner'), async (req, res) => {
+async function signTimecardUpload() {
+  const signInput = document.getElementById('dirTimecardSign');
+  const signName = signInput ? signInput.value.trim() : '';
+  
+  if (!signName) {
+    alert('Please type your full name to verify the attendance upload.');
+    if (signInput) signInput.focus();
+    return;
+  }
+  
+  const pp = dirPayrollPP || payPeriod;
+  const center = currentUser.center;
+  
   try {
-    const { signature_data } = req.body;
-    await pool.query(`INSERT INTO app_settings (key, value, updated_at) VALUES ('owner_signature', $1, NOW()) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()`, [signature_data]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-app.get('/api/settings/signature', requireAuth, async (req, res) => {
-  try {
-    const result = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
-    res.json(result.rows[0] || { value: null });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Change password
-app.post('/api/change-password', requireAuth, async (req, res) => {
-  try {
-    const { current_password, new_password } = req.body;
-    const user = await pool.query('SELECT * FROM users WHERE id = $1', [req.session.user.id]);
-    const valid = await bcrypt.compare(current_password, user.rows[0].password_hash);
-    if (!valid) return res.status(400).json({ error: 'Current password is incorrect' });
-    const hash = await bcrypt.hash(new_password, 10);
-    await pool.query('UPDATE users SET password_hash = $1 WHERE id = $2', [hash, req.session.user.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+    await api('/api/payroll-workflow/sign-timecards', { method: 'POST', body: {
+      period_start: pp.start, period_end: pp.end, center, signature_name: signName
+    }});
+    // Re-render to show the updated green status
+    renderDirectorPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
+}
 
 // ========================
-// PAYROLL PERIOD WORKFLOW
+// PAYROLL PROCESSING
 // ========================
-app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
-  try {
-    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const user = req.session.user;
-    const centers = user.role === 'director' ? [user.center] : ['Peace Boulevard', 'Niles', 'Montessori'];
-    const results = {};
-    for (const center of centers) {
-      await pool.query(`INSERT INTO payroll_periods (period_start, period_end, pay_date, center) VALUES ($1, $2, $3, $4) ON CONFLICT (period_start, period_end, center) DO NOTHING`, [pp.start, pp.end, pp.payDate, center]);
-      const r = await pool.query('SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3', [pp.start, pp.end, center]);
-      results[center] = r.rows[0];
-    }
-    const sigs = await pool.query('SELECT * FROM payroll_signatures WHERE period_start = $1 AND period_end = $2 ORDER BY created_at', [pp.start, pp.end]);
-    res.json({ payPeriod: pp, periods: results, signatures: sigs.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/sign-timecards', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center, signature_name } = req.body;
-    const user = req.session.user;
-    await pool.query(`UPDATE payroll_periods SET timecards_uploaded = TRUE, timecards_signed_by = $1, timecards_signed_at = NOW() WHERE period_start = $2 AND period_end = $3 AND center = $4`, [signature_name, period_start, period_end, center]);
-    await pool.query(`INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement) VALUES ($1, $2, $3, 'timecards_verified', $4, $5, $6, 'I verify that the uploaded timecards have been reviewed and are accurate.')`, [period_start, period_end, center, user.id, user.full_name, signature_name]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/submit-timeoff', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center } = req.body;
-    const user = req.session.user;
-    await pool.query(`INSERT INTO payroll_periods (period_start, period_end, pay_date, center) VALUES ($1, $2, $2, $3) ON CONFLICT (period_start, period_end, center) DO NOTHING`, [period_start, period_end, center]);
-    await pool.query(`UPDATE payroll_periods SET timeoff_submitted = TRUE, timeoff_submitted_by = $1, timeoff_submitted_at = NOW(), change_request_pending = FALSE WHERE period_start = $2 AND period_end = $3 AND center = $4`, [user.full_name, period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/unsubmit-timeoff', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center } = req.body;
-    const pp = await pool.query(`SELECT payroll_accessed_at, payroll_closed FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
-    if (pp.rows.length > 0 && pp.rows[0].payroll_accessed_at) return res.status(403).json({ error: 'locked', message: 'Payroll processing has already begun. Submit a change request for Jared to approve.' });
-    await pool.query(`UPDATE payroll_periods SET timeoff_submitted = FALSE, timeoff_submitted_by = NULL, timeoff_submitted_at = NULL WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/request-timeoff-change', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center, reason } = req.body;
-    const user = req.session.user;
-    await pool.query(`UPDATE payroll_periods SET change_request_pending = TRUE, change_request_reason = $1 WHERE period_start = $2 AND period_end = $3 AND center = $4`, [user.full_name + ': ' + reason, period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/approve-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { period_start, period_end, center } = req.body;
-    await pool.query(`UPDATE payroll_periods SET timeoff_submitted = FALSE, change_request_pending = FALSE, change_request_reason = NULL, payroll_accessed_at = NULL WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/deny-timeoff-change', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { period_start, period_end, center } = req.body;
-    await pool.query(`UPDATE payroll_periods SET change_request_pending = FALSE, change_request_reason = NULL WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/mark-accessed', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { period_start, period_end, center } = req.body;
-    await pool.query(`UPDATE payroll_periods SET payroll_accessed_at = COALESCE(payroll_accessed_at, NOW()) WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/sign-timeoff', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center, signature_name } = req.body;
-    const user = req.session.user;
-    await pool.query(`UPDATE payroll_periods SET timeoff_approved = TRUE, timeoff_signed_by = $1, timeoff_signed_at = NOW() WHERE period_start = $2 AND period_end = $3 AND center = $4`, [signature_name, period_start, period_end, center]);
-    await pool.query(`INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement) VALUES ($1, $2, $3, 'timeoff_verified', $4, $5, $6, 'I verify that all paid and unpaid time off entries for this pay period are accurate.')`, [period_start, period_end, center, user.id, user.full_name, signature_name]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/director-close', requireAuth, async (req, res) => {
-  try {
-    const { period_start, period_end, center, signature_name } = req.body;
-    const user = req.session.user;
-    await pool.query(`UPDATE payroll_periods SET director_closed = TRUE, director_closed_by = $1, director_closed_at = NOW(), status = 'director_submitted' WHERE period_start = $2 AND period_end = $3 AND center = $4`, [signature_name, period_start, period_end, center]);
-    await pool.query(`INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement) VALUES ($1, $2, $3, 'director_closeout', $4, $5, $6, 'I certify that all payroll information for this pay period has been reviewed, verified, and submitted for processing.')`, [period_start, period_end, center, user.id, user.full_name, signature_name]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { period_start, period_end, signature_name } = req.body;
-    const user = req.session.user;
-    await pool.query(`UPDATE payroll_periods SET payroll_closed = TRUE, payroll_closed_by = $1, payroll_closed_at = NOW(), status = 'closed' WHERE period_start = $2 AND period_end = $3`, [signature_name, period_start, period_end]);
-    for (const center of ['Peace Boulevard', 'Niles', 'Montessori']) {
-      await pool.query(`INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement) VALUES ($1, $2, $3, 'payroll_processed', $4, $5, $6, 'Payroll has been processed for this pay period.')`, [period_start, period_end, center, user.id, user.full_name, signature_name]);
-    }
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ========================
-// PAYROLL REPORT
-// ========================
-app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
-  try {
-    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const center = req.query.center;
-    let empQuery, empParams;
-    if (center) {
-      empQuery = `SELECT e.*, COALESCE(e.payroll_center, e.center) as effective_payroll_center FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $2 AND dh.work_date <= $3)) AND COALESCE(e.payroll_center, e.center) = $1 ORDER BY e.last_name, e.first_name`;
-      empParams = [center, pp.start, pp.end];
+async function renderPayroll() {
+  const el = document.getElementById('pageContent');
+  const isDirector = currentUser.role === 'director';
+  const isPayroll = ['owner','payroll'].includes(currentUser.role);
+  const center = isDirector ? currentUser.center : selectedCenter;
+  
+  // Load workflow status
+  let wfStatus = {};
+  try { wfStatus = await api(`/api/payroll-period-status?date=${payPeriod.start}`); } catch(e) {}
+  const periods = wfStatus.periods || {};
+  const sigs = wfStatus.signatures || [];
+  
+  // Pay period navigator
+  let html = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:20px">
+    <button class="btn btn-outline btn-sm" onclick="navPayPeriod(-1)">◀ Previous</button>
+    <div class="pay-period-badge" style="flex:1;justify-content:center">
+      <div style="text-align:center">
+        <div class="label">Pay Period</div>
+        <div>${payPeriod.label}</div>
+        <div style="font-size:11px;color:var(--gray-600)">Pay Date: ${new Date(payPeriod.payDate+'T12:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'})}</div>
+      </div>
+    </div>
+    <button class="btn btn-outline btn-sm" onclick="navPayPeriod(1)">Next ▶</button>
+  </div>`;
+  
+  if (!isDirector) {
+    html += `<div class="center-tabs">`;
+    ['Peace Boulevard','Niles','Montessori'].forEach(c => {
+      const p = periods[c];
+      const statusIcon = p?.payroll_closed ? '✅' : p?.director_closed ? '📨' : p?.timecards_uploaded ? '📋' : '⏳';
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderPayroll()">${statusIcon} ${c}</div>`;
+    });
+    html += `</div>`;
+  }
+  
+  const pp = periods[center] || {};
+  
+  // ---- WORKFLOW STATUS CARD ----
+  html += `<div class="card"><div class="card-header"><h3>Payroll Workflow — ${center}</h3></div><div class="card-body">
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px">
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.timecards_uploaded?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.timecards_uploaded?'✅':'1️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Timecards</div>
+        ${pp.timecards_signed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timecards_signed_by}</div>` : ''}
+      </div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.timeoff_approved||pp.timeoff_submitted?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.timeoff_approved||pp.timeoff_submitted?'✅':'2️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Time Off</div>
+        ${pp.timeoff_signed_by||pp.timeoff_submitted_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timeoff_signed_by||pp.timeoff_submitted_by}</div>` : ''}
+      </div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.payroll_closed?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.payroll_closed?'✅':'3️⃣'}</div>
+        <div style="font-size:11px;font-weight:700;margin-top:4px">Payroll Processed</div>
+        ${pp.payroll_closed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.payroll_closed_by}</div>` : ''}
+      </div>
+    </div>
+  </div></div>`;
+  
+  // ---- STEP 1: TIMECARD UPLOAD (Director) ----
+  if (isDirector || isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Step 1: Upload Timecards</h3>
+      ${pp.timecards_uploaded ? '<span class="badge badge-success">Complete</span>' : ''}
+    </div><div class="card-body">`;
+    
+    if (!pp.timecards_uploaded) {
+      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Upload the Playground "Daily Staff Hours" CSV for <strong>${center}</strong> for the dates <strong>${payPeriod.label}</strong>.</p>
+        <input type="file" id="timecardFile" accept=".csv" style="margin-bottom:12px"><br>
+        <button class="btn btn-primary" onclick="importTimecard()">Upload & Process</button>
+        <div id="importResult" style="margin-top:16px"></div>
+        
+        <div id="signTimecardSection" style="display:none;margin-top:20px;padding:16px;border:2px solid var(--navy);border-radius:8px;background:rgba(27,42,74,0.03)">
+          <h4 style="font-size:14px;color:var(--navy);margin-bottom:8px">Verify & Sign</h4>
+          <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">I verify that the uploaded timecards have been reviewed and are accurate.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="tcSignName" placeholder="Full name"></div>
+          <button class="btn btn-gold" onclick="signTimecards()">Sign & Submit Timecards</button>
+        </div>`;
     } else {
-      empQuery = `SELECT e.*, COALESCE(e.payroll_center, e.center) as effective_payroll_center FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY COALESCE(e.payroll_center, e.center), e.last_name, e.first_name`;
-      empParams = [pp.start, pp.end];
+      html += `<div style="background:var(--success-bg);padding:12px;border-radius:8px;font-size:13px;color:var(--success)">
+        ✅ Timecards uploaded and verified by <strong>${pp.timecards_signed_by}</strong> on ${pp.timecards_signed_at ? new Date(pp.timecards_signed_at).toLocaleString() : ''}
+      </div>`;
     }
-    const empsResult = await pool.query(empQuery, empParams);
-    let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, req.session.user));
-    const report = [];
-    for (const emp of empRows) {
-      const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
-      const allDates = new Set();
-      sunSatWeeks.forEach(w => {
-        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
-          allDates.add(d.toISOString().split('T')[0]);
-      });
-      const allHours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`, [emp.id, [...allDates]]);
-      const hoursMap = {};
-      allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
-      let totalHours = 0;
-      const weekDetails = [];
-      for (const w of sunSatWeeks) {
-        let weekTotal = 0, weekInPeriod = 0;
-        const days = [];
-        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
-          const ds = d.toISOString().split('T')[0];
-          const h = hoursMap[ds] || 0;
-          weekTotal += h;
-          const inPeriod = ds >= pp.start && ds <= pp.end;
-          if (inPeriod) weekInPeriod += h;
-          days.push({ date: ds, hours: h, inPeriod });
-        }
-        const weekOT = Math.max(0, weekTotal - 40);
-        const weekReg = weekTotal - weekOT;
-        weekDetails.push({ ...w, days, weekTotal, weekOT, weekReg, weekInPeriod });
-        totalHours += weekInPeriod;
-      }
-      let periodRegular = 0, periodOT = 0;
-      for (const w of weekDetails) {
-        if (w.weekTotal <= 40) { periodRegular += w.weekInPeriod; }
-        else {
-          let inPeriodAfter40 = 0, runningTotal = 0;
-          for (const day of w.days) {
-            runningTotal += day.hours;
-            if (day.inPeriod && runningTotal > 40) inPeriodAfter40 += Math.min(day.hours, runningTotal - 40);
-          }
-          periodOT += inPeriodAfter40;
-          periodRegular += (w.weekInPeriod - inPeriodAfter40);
-        }
-      }
-      const pto = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
-      const ptoDays = parseInt(pto.rows[0].count);
-      const unpaid = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
-      const unpaidDays = parseInt(unpaid.rows[0].count);
-      const increases = await pool.query(`SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`, [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']);
-      report.push({
-        id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.effective_payroll_center || emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
-        is_full_time: emp.is_full_time,
-        totalHours: Math.round(totalHours * 100) / 100,
-        regularHours: Math.round(periodRegular * 100) / 100,
-        overtimeHours: Math.round(periodOT * 100) / 100,
-        ptoDays, unpaidDays, payIncreases: increases.rows, weekDetails
-      });
+    html += `</div></div>`;
+  }
+  
+  // ---- STEP 2: TIME OFF APPROVAL (Director) ----
+  if (isDirector || isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Step 2: Verify Time Off</h3>
+      ${pp.timeoff_approved ? '<span class="badge badge-success">Complete</span>' : ''}
+    </div><div class="card-body">`;
+    
+    if (!pp.timeoff_approved) {
+      html += `<p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">Review all paid and unpaid time off entries for this period. <a href="#" onclick="navigate('timeoff');return false" style="color:var(--navy)">Open Time Off Tracker →</a></p>
+        <div style="padding:16px;border:2px solid var(--navy);border-radius:8px;background:rgba(27,42,74,0.03);margin-top:12px">
+          <h4 style="font-size:14px;color:var(--navy);margin-bottom:8px">Verify & Sign</h4>
+          <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">I verify that all paid and unpaid time off entries for this pay period are accurate.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="toSignName" placeholder="Full name"></div>
+          <button class="btn btn-gold" onclick="signTimeoff()">Sign & Approve Time Off</button>
+        </div>`;
+    } else {
+      html += `<div style="background:var(--success-bg);padding:12px;border-radius:8px;font-size:13px;color:var(--success)">
+        ✅ Time off verified by <strong>${pp.timeoff_signed_by}</strong> on ${pp.timeoff_signed_at ? new Date(pp.timeoff_signed_at).toLocaleString() : ''}
+      </div>`;
     }
-    const termResult = await pool.query(
-      `SELECT * FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL AND terminated_date >= $1 ORDER BY terminated_date DESC`,
-      [pp.start]
-    );
-    const terminations = termResult.rows.map(t => ({
-      id: t.id, first_name: t.first_name, last_name: t.last_name,
-      center: t.center, position: t.position,
-      terminated_date: t.terminated_date, termination_reason: t.termination_reason,
-      terminated_by: t.terminated_by, termination_payroll_count: 0
-    }));
-    res.json({ payPeriod: pp, report, terminations });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ========================
-// PAYROLL REPORT PDF GENERATION
-// ========================
-async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({ size: 'LETTER', margin: 40, bufferPages: true });
-    const chunks = [];
-    doc.on('data', c => chunks.push(c));
-    doc.on('end', () => resolve(Buffer.concat(chunks)));
-    doc.on('error', reject);
-    const navy = '#1B2A4A';
-    const gold = '#C8963E';
-    const gray = '#5A6270';
-    const lightGray = '#F0F2F5';
-    const danger = '#C0392B';
-    const success = '#2E7D4F';
-    const pageW = 612 - 80;
-    doc.rect(0, 0, 612, 70).fill(navy);
-    doc.fill('#FFFFFF').fontSize(18).font('Helvetica-Bold').text('TCC Payroll Report', 40, 20);
-    doc.fontSize(11).font('Helvetica').text(`Pay Period: ${pp.label}`, 40, 42);
-    doc.text(`Pay Date: ${new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric', year:'numeric'})}`, 40, 55, { continued: false });
-    doc.fill(gold).fontSize(9).text(`Generated: ${new Date().toLocaleString()}`, 400, 25, { align: 'right', width: 172 });
-    doc.text('The Children\'s Center', 400, 38, { align: 'right', width: 172 });
-    doc.y = 85;
-    function drawTable(headers, rows, colWidths, opts = {}) {
-      const startY = doc.y;
-      const rowH = 18;
-      const headerH = 22;
-      let y = startY;
-      const neededH = headerH + (rows.length * rowH) + 10;
-      if (y + neededH > 720) { doc.addPage(); y = 40; }
-      doc.rect(40, y, pageW, headerH).fill(navy);
-      let x = 40;
-      headers.forEach((h, i) => {
-        doc.fill('#FFFFFF').fontSize(8).font('Helvetica-Bold')
-          .text(h, x + 4, y + 6, { width: colWidths[i] - 8, align: opts.aligns?.[i] || 'left' });
-        x += colWidths[i];
+    html += `</div></div>`;
+  }
+  
+  // ---- PAYROLL REPORT (Jared/Mary) ----
+  if (isPayroll) {
+    html += `<div class="card"><div class="card-header"><h3>Payroll Report — All Centers</h3>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="loadPayrollReport()">Generate Report</button>
+        <button class="btn btn-gold btn-sm" onclick="downloadPayrollPDF()">📄 Download PDF</button>
+      </div>
+    </div><div class="card-body"><div id="payrollReportArea"><em style="color:var(--gray-400)">Click "Generate Report" to preview on screen, or "Download PDF" for the full report with W-4s.</em></div></div></div>`;
+    
+    // Check for pending pay increases
+    let pendingIncreases = [];
+    try {
+      const piResult = await api('/api/pay-increases');
+      pendingIncreases = piResult.filter(p => p.status === 'pending');
+    } catch(e) {}
+    
+    if (pendingIncreases.length > 0) {
+      html += `<div class="card" style="border-left:4px solid var(--danger);margin-bottom:16px"><div class="card-header"><h3 style="color:var(--danger)">⚠️ Pending Pay Increase Requests (${pendingIncreases.length})</h3></div>
+        <div class="card-body">
+          <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">All pay increase requests must be approved or denied before payroll can be processed.</p>
+          <table class="data-table"><thead><tr><th>Employee</th><th>Center</th><th>Current Rate</th><th>Proposed Rate</th><th>Requested By</th></tr></thead><tbody>`;
+      pendingIncreases.forEach(pi => {
+        html += `<tr><td><strong>${pi.last_name}, ${pi.first_name}</strong></td><td>${pi.center}</td>
+          <td>$${parseFloat(pi.current_rate).toFixed(2)}</td><td>$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+          <td>${pi.requested_by_name||''}</td></tr>`;
       });
-      y += headerH;
-      rows.forEach((row, ri) => {
-        if (y + rowH > 730) { doc.addPage(); y = 40; }
-        const bg = row._bg || (ri % 2 === 0 ? '#FFFFFF' : lightGray);
-        doc.rect(40, y, pageW, rowH).fill(bg);
-        x = 40;
-        row.cells.forEach((cell, ci) => {
-          const color = cell.color || navy;
-          const font = cell.bold ? 'Helvetica-Bold' : 'Helvetica';
-          doc.fill(color).fontSize(9).font(font)
-            .text(String(cell.text || ''), x + 4, y + 5, { width: colWidths[ci] - 8, align: opts.aligns?.[ci] || 'left' });
-          x += colWidths[ci];
+      html += `</tbody></table>
+        <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="navigate('pay-increases')">Review Pay Increases →</button>
+      </div></div>`;
+    }
+    
+    // Close out button for Jared
+    if (!pp.payroll_closed) {
+      const allDone = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.timecards_uploaded && periods[c]?.timeoff_submitted);
+      const hasPendingPI = pendingIncreases.length > 0;
+      html += `<div class="card"><div class="card-header"><h3>Step 4: Process Payroll</h3></div><div class="card-body">`;
+      if (allDone && !hasPendingPI) {
+        html += `<div style="padding:16px;border:2px solid var(--gold);border-radius:8px;background:rgba(200,150,62,0.05)">
+          <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">All centers have uploaded attendance and submitted time off. Process payroll and close this period.</p>
+          <div class="form-group"><label>Type your full name to sign</label><input id="payrollCloseSign" placeholder="Full name"></div>
+          <button class="btn btn-success" onclick="closePayroll()">Close Payroll Period</button>
+        </div>`;
+      } else {
+        const blockers = [];
+        const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.timecards_uploaded || !periods[c]?.timeoff_submitted);
+        if (waiting.length > 0) {
+          const details = waiting.map(c => {
+            const p = periods[c] || {};
+            const missing = [];
+            if (!p.timecards_uploaded) missing.push('attendance');
+            if (!p.timeoff_submitted) missing.push('time off');
+            return `${c} (${missing.join(' & ')})`;
+          });
+          blockers.push(`⏳ Waiting for: ${details.join(', ')}`);
+        }
+        if (hasPendingPI) blockers.push(`🚫 ${pendingIncreases.length} pending pay increase request(s) must be resolved first`);
+        html += blockers.map(b => `<p style="font-size:13px;color:var(--warning);margin-bottom:8px">${b}</p>`).join('');
+      }
+      html += `</div></div>`;
+    }
+  }
+  
+  // ---- QuickBooks Payroll Summary Upload (Step 5) ----
+  if (isPayroll) {
+    html += `<div class="card" style="margin-top:20px"><div class="card-header"><h3>Step 5: Upload QuickBooks Payroll Summary</h3></div>
+      <div class="card-body">
+        <div style="background:var(--gold-pale);border:1px solid var(--gold);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--gray-700)">
+          <strong>Instructions:</strong><br>
+          1. In QuickBooks, go to <strong>Reports → Standard Reports → Payroll Summary by Employee</strong><br>
+          2. Select the <strong>last pay date</strong> for this period<br>
+          3. Click <strong>Customize</strong> → What to include: <strong>All Employees, All Locations</strong><br>
+          4. Group by <strong>Employee</strong>, select <strong>Totals and Details</strong><br>
+          5. Select <strong>Other Pay, Net Pay, and Hours</strong><br>
+          6. Click <strong>Run Report</strong>, then <strong>Apply Changes</strong><br>
+          7. <strong>Export to Excel</strong> and upload below
+        </div>
+        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates PTO used (paid time off hours) on the PTO Summary. All hours that are not Regular Pay, Overtime, or Salary are counted as PTO used.</p>
+        <input type="file" id="qbFile" accept=".xls,.xlsx" style="margin-bottom:12px">
+        <button class="btn btn-primary" onclick="uploadQBPayroll()">Upload QuickBooks Report</button>
+        <div id="qbUploadResult" style="margin-top:12px"></div>
+      </div></div>`;
+    
+    // ---- Pending Time Off Change Requests ----
+    try {
+      const changeReqs = await api('/api/timeoff-change-requests');
+      if (changeReqs.length > 0) {
+        html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--warning)"><div class="card-header"><h3>⚠️ Pending Time Off Change Requests (${changeReqs.length})</h3></div>
+          <div class="card-body"><table class="data-table"><thead><tr>
+            <th>Employee</th><th>Center</th><th>Date</th><th>Requested</th><th>Reason</th><th>Requested By</th><th>Actions</th>
+          </tr></thead><tbody>`;
+        changeReqs.forEach(cr => {
+          const typeLabel = cr.requested_type === 'P' ? 'Paid (P)' : cr.requested_type === 'U' ? 'Unpaid (U)' : 'Remove';
+          html += `<tr>
+            <td><strong>${cr.last_name}, ${cr.first_name}</strong></td>
+            <td>${cr.center}</td>
+            <td>${fmtDate(cr.entry_date)}</td>
+            <td><span style="font-weight:700;color:${cr.requested_type==='P'?'var(--info)':'var(--danger)'}">${typeLabel}</span></td>
+            <td style="font-size:11px">${cr.reason||''}</td>
+            <td style="font-size:11px">${cr.requested_by_name}</td>
+            <td style="white-space:nowrap">
+              <button class="btn btn-success btn-sm" onclick="approveChangeReq(${cr.id})">Approve</button>
+              <button class="btn btn-outline btn-sm" onclick="denyChangeReq(${cr.id})">Deny</button>
+            </td>
+          </tr>`;
         });
-        y += rowH;
+        html += `</tbody></table></div></div>`;
+      }
+    } catch(e) {}
+  }
+  
+  // Signature log
+  if (sigs.length > 0) {
+    html += `<div class="card"><div class="card-header"><h3>Signature Log</h3></div><div class="card-body">
+      <table class="data-table"><thead><tr><th>Action</th><th>Center</th><th>Signed By</th><th>Date</th></tr></thead><tbody>`;
+    sigs.forEach(s => {
+      const labels = {'timecards_verified':'Timecards Verified','timeoff_verified':'Time Off Approved','director_closeout':'Director Close Out','payroll_processed':'Payroll Processed'};
+      html += `<tr><td>${labels[s.action_type]||s.action_type}</td><td>${s.center||'All'}</td><td><strong>${s.signed_by_name}</strong> (${s.signature_text})</td><td>${new Date(s.created_at).toLocaleString()}</td></tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+  
+  el.innerHTML = html;
+}
+
+function navPayPeriod(dir) {
+  const d = new Date(payPeriod.start + 'T12:00:00');
+  d.setDate(d.getDate() + (dir * 16)); // Jump ~half month
+  payPeriod = null; // Will recalculate
+  api(`/api/pay-period?date=${d.toISOString().split('T')[0]}`).then(pp => {
+    payPeriod = pp;
+    document.getElementById('payPeriodLabel').textContent = pp.label + ' · Pay Date: ' + new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    if (currentPage === 'payroll') renderPayroll();
+    else if (currentPage === 'timeoff') renderTimeOff();
+    else if (currentPage === 'timeoff-calendar') renderTimeOffCalendar();
+  });
+}
+
+async function importTimecard() {
+  const file = document.getElementById('timecardFile').files[0];
+  if (!file) return alert('Please select a CSV file.');
+  
+  const fd = new FormData();
+  fd.append('file', file);
+  
+  const resultEl = document.getElementById('importResult');
+  resultEl.innerHTML = '<em style="color:var(--gray-400)">Processing CSV...</em>';
+  
+  const result = await apiForm('/api/import-timecard', fd);
+  
+  if (result.error) {
+    resultEl.innerHTML = `<div class="confidentiality-banner" style="background:var(--danger-bg);border-color:var(--danger);color:var(--danger)">Error: ${result.error}</div>`;
+  } else {
+    let html = '';
+    
+    if (result.unmatchedNames && result.unmatchedNames.length > 0) {
+      html += `<div style="background:var(--danger-bg);border:2px solid var(--danger);border-radius:8px;padding:16px;margin-bottom:12px">
+        <div style="font-size:15px;font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ ${result.unmatchedNames.length} Name(s) Not Found in Roster</div>
+        <p style="font-size:13px;color:var(--navy);margin-bottom:12px">These names from the CSV do not match any active employee. Their hours were <strong>NOT imported</strong>.</p>
+        ${result.unmatchedNames.map(n => '<div style="padding:6px 12px;background:white;border-radius:6px;margin-bottom:4px;font-weight:600"><span style="color:var(--danger)">✕</span> ' + n + '</div>').join('')}
+        <div style="font-size:12px;color:var(--navy);margin-top:8px;padding:10px;background:white;border-radius:6px;border-left:4px solid var(--warning)">
+          <strong>Check with HR:</strong> Staff may need to be reinstated, or their name in Playground may not match the roster name in Payroll Hub.
+        </div>
+      </div>`;
+    }
+    
+    html += `<div class="confidentiality-banner" style="background:var(--success-bg);border-color:var(--success);color:var(--success)">
+      ✅ Processed ${result.imported} timecard rows — ${result.matched} matched to employees, ${result.savedDays} daily hour records saved.
+    </div>`;
+    
+    if (result.preview && result.preview.length > 0) {
+      html += `<div class="table-scroll" style="margin-top:12px"><table class="data-table"><thead><tr><th>Name</th><th>Date</th><th>Billable</th><th>Hours</th></tr></thead><tbody>`;
+      result.preview.slice(0,20).forEach(r => {
+        html += `<tr><td><strong>${r.name}</strong></td><td>${r.date}</td><td>${r.billable}</td><td style="font-family:'JetBrains Mono',monospace">${r.hours}</td></tr>`;
       });
-      doc.y = y + 6;
+      html += `</tbody></table></div>`;
     }
-    function sectionHeader(title, color) {
-      if (doc.y > 680) doc.addPage();
-      doc.y += 8;
-      doc.rect(40, doc.y, pageW, 2).fill(color || gold);
-      doc.y += 6;
-      doc.fill(color || navy).fontSize(13).font('Helvetica-Bold').text(title, 40, doc.y);
-      doc.y += 20;
+    
+    resultEl.innerHTML = html;
+    // Show sign section
+    const signSection = document.getElementById('signTimecardSection');
+    if (signSection) signSection.style.display = 'block';
+  }
+}
+
+async function signTimecards() {
+  const name = document.getElementById('tcSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  await api('/api/payroll-workflow/sign-timecards', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center, signature_name: name } });
+  renderPayroll();
+}
+
+async function signTimeoff() {
+  const name = document.getElementById('toSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  await api('/api/payroll-workflow/sign-timeoff', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center, signature_name: name } });
+  renderPayroll();
+}
+
+async function directorClose() {
+  const name = document.getElementById('closeSignName').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  if (!confirm('Are you sure you want to close out this pay period? This cannot be undone.')) return;
+  await api('/api/payroll-workflow/director-close', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, center: currentUser.center, signature_name: name } });
+  renderPayroll();
+}
+
+async function closePayroll() {
+  const name = document.getElementById('payrollCloseSign').value.trim();
+  if (!name) return alert('Please type your full name to sign.');
+  if (!confirm('Close payroll for ALL centers for this period?')) return;
+  await api('/api/payroll-workflow/payroll-close', { method: 'POST', body: { period_start: payPeriod.start, period_end: payPeriod.end, signature_name: name } });
+  renderPayroll();
+}
+
+async function uploadQBPayroll() {
+  const fileInput = document.getElementById('qbFile');
+  const resultDiv = document.getElementById('qbUploadResult');
+  if (!fileInput.files[0]) { alert('Select the QuickBooks Excel file first'); return; }
+  
+  const formData = new FormData();
+  formData.append('file', fileInput.files[0]);
+  
+  resultDiv.innerHTML = '<em>Processing QuickBooks report...</em>';
+  try {
+    const res = await fetch('/api/import-qb-payroll', { method: 'POST', body: formData });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error);
+    
+    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-bottom:12px">
+      <div style="font-weight:700;color:#27500A;margin-bottom:8px">✅ QuickBooks report processed</div>
+      <div style="font-size:12px;color:#3B6D11">${data.dateRange}</div>
+      <div style="font-size:12px;color:#3B6D11">${data.totalEmployeesWithPTO} employees with PTO hours, ${data.matched} matched</div>
+    </div>`;
+    
+    if (data.results && data.results.length > 0) {
+      html += `<table class="data-table" style="font-size:12px"><thead><tr><th>Employee</th><th>PTO This Period</th><th>New YTD Total</th></tr></thead><tbody>`;
+      data.results.forEach(r => {
+        html += `<tr><td>${r.name}</td><td style="font-weight:600">${r.hours}h</td>
+          <td>${r.newTotal !== null ? r.newTotal + 'h' : '<span style="color:var(--danger)">' + (r.error||'Error') + '</span>'}</td></tr>`;
+      });
+      html += `</tbody></table>`;
     }
-    const allIncreases = [];
-    report.forEach(e => {
+    
+    resultDiv.innerHTML = html;
+  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
+}
+
+async function approveChangeReq(id) {
+  if (!confirm('Approve this change request? The time off entry will be updated.')) return;
+  try {
+    await api(`/api/timeoff-change-requests/${id}/approve`, { method: 'POST' });
+    renderPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function denyChangeReq(id) {
+  if (!confirm('Deny this change request?')) return;
+  try {
+    await api(`/api/timeoff-change-requests/${id}/deny`, { method: 'POST' });
+    renderPayroll();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function downloadPayrollPDF() {
+  window.open(`/api/payroll-report/pdf?date=${payPeriod.start}`, '_blank');
+}
+
+async function loadPayrollReport() {
+  const area = document.getElementById('payrollReportArea');
+  area.innerHTML = '<em style="color:var(--gray-400)">Generating report for all centers...</em>';
+  
+  try {
+    // Load all centers
+    const data = await api(`/api/payroll-report?date=${payPeriod.start}&center=`);
+    
+    if (!data.report || data.report.length === 0) {
+      area.innerHTML = '<p style="color:var(--gray-400)">No payroll data for this period. Upload timecards first.</p>';
+      return;
+   }
+
+    window._lastPayrollReportData = data;
+
+    let html = `<div style="font-size:12px;color:var(--gray-600);margin-bottom:12px">
+      <strong>Period:</strong> ${data.payPeriod.label} · <strong>Generated:</strong> ${new Date().toLocaleString()}
+    </div>`;
+    // ---- SECTION 1: Approved Pay Increases ----
+    let allIncreases = [];
+    data.report.forEach(e => {
       if (e.payIncreases && e.payIncreases.length > 0) {
         e.payIncreases.forEach(pi => allIncreases.push({ ...pi, empName: `${e.last_name}, ${e.first_name}`, center: e.center }));
       }
     });
+    
     if (allIncreases.length > 0) {
-      sectionHeader('Pay Increases This Period');
-      const piRows = allIncreases.map(pi => ({
-        cells: [
-          { text: pi.empName, bold: true },
-          { text: pi.center },
-          { text: '$' + parseFloat(pi.current_rate).toFixed(2) },
-          { text: '$' + parseFloat(pi.proposed_rate).toFixed(2), color: success, bold: true },
-          { text: pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : '' }
-        ]
-      }));
-      drawTable(['Employee', 'Center', 'Previous Rate', 'New Rate', 'Effective'], piRows, [160, 110, 90, 90, 82]);
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">Pay Increases This Period</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Employee</th><th>Center</th><th>Previous Rate</th><th>New Rate</th><th>Effective</th>
+      </tr></thead><tbody>`;
+      allIncreases.forEach(pi => {
+        html += `<tr>
+          <td><strong>${pi.empName}</strong></td><td>${pi.center}</td>
+          <td style="font-family:'JetBrains Mono',monospace">$${parseFloat(pi.current_rate).toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;color:var(--success);font-weight:700">$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+          <td>${pi.reviewed_at ? new Date(pi.reviewed_at).toLocaleDateString() : ''}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
     }
-    if (newHireW4s && newHireW4s.length > 0) {
-      sectionHeader('New Employees This Period');
-      const neRows = newHireW4s.map(e => ({
-        cells: [
-          { text: `${e.last_name}, ${e.first_name}`, bold: true },
-          { text: e.center },
-          { text: e.position || '' },
-          { text: e.start_date ? new Date(e.start_date).toLocaleDateString() : '' },
-          { text: e.hourly_rate ? '$' + parseFloat(e.hourly_rate).toFixed(2) : '' },
-          { text: e.hasW4 ? 'See attached' : 'Missing' }
-        ]
-      }));
-      drawTable(['Name', 'Center', 'Position', 'Start Date', 'Rate', 'W-4'], neRows, [140, 100, 80, 80, 70, 62]);
+    
+    // ---- SECTION 2: New Employees ----
+    const ppStart = new Date(data.payPeriod.start + 'T12:00:00');
+    const ppEnd = new Date(data.payPeriod.end + 'T12:00:00');
+    const newEmps = employees.filter(e => {
+      if (!e.start_date) return false;
+      const sd = new Date(e.start_date);
+      return sd >= ppStart && sd <= ppEnd;
+    });
+    
+    if (newEmps.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">New Employees This Period</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Center</th><th>Position</th><th>Start Date</th><th>Rate</th><th>W-4</th>
+      </tr></thead><tbody>`;
+      newEmps.forEach(e => {
+        html += `<tr>
+          <td><strong>${e.last_name}, ${e.first_name}</strong></td><td>${e.center}</td>
+          <td>${e.position||'—'}</td>
+          <td>${new Date(e.start_date).toLocaleDateString()}</td>
+          <td style="font-family:'JetBrains Mono',monospace">${e.hourly_rate ? '$'+parseFloat(e.hourly_rate).toFixed(2) : '—'}</td>
+          <td><span style="color:var(--gray-400);font-size:11px">See PDF report</span></td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
     }
-    if (terminations && terminations.length > 0) {
-      sectionHeader('Terminations — Action Required', danger);
-      doc.fill(gray).fontSize(9).font('Helvetica')
-        .text('Verify these employees have been terminated in QuickBooks.', 40, doc.y);
-      doc.y += 14;
-      const tRows = terminations.map(t => ({
-        cells: [
-          { text: `${t.last_name}, ${t.first_name}`, bold: true },
-          { text: t.center },
-          { text: t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '' },
-          { text: t.termination_reason || '' },
-          { text: t.terminated_by || '' }
-        ]
-      }));
-      drawTable(['Name', 'Center', 'Last Day', 'Reason', 'Terminated By'], tRows, [140, 100, 80, 130, 82]);
+    
+    // ---- SECTION 3: Terminations ----
+    if (data.terminations && data.terminations.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--danger);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid #F09595">Terminations — Action Required</h4>`;
+      html += `<p style="font-size:12px;color:var(--gray-600);margin-bottom:8px">Verify these employees have been terminated in QuickBooks. They will appear on this report and the next report, then be removed.</p>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Center</th><th>Last Day</th><th>Reason</th><th>Terminated By</th><th>Status</th>
+      </tr></thead><tbody>`;
+      data.terminations.forEach(t => {
+        const count = t.termination_payroll_count || 0;
+        const statusLabel = count === 0 ? '🔴 New — Remove from QuickBooks' : '🟡 Verify removed from QuickBooks';
+        const statusColor = count === 0 ? 'var(--danger)' : 'var(--warning)';
+        html += `<tr>
+          <td><strong>${t.last_name}, ${t.first_name}</strong></td>
+          <td>${t.center}</td>
+          <td>${t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '—'}</td>
+          <td style="font-size:11px">${t.termination_reason || '—'}</td>
+          <td style="font-size:11px">${t.terminated_by || '—'}</td>
+          <td style="font-size:11px;font-weight:700;color:${statusColor}">${statusLabel}</td>
+        </tr>`;
+      });
+      html += `</tbody></table></div>`;
     }
+    
+    // ---- SECTION 4: Hours by Center ----
     const byCenter = {};
-    report.forEach(r => { if (!byCenter[r.center]) byCenter[r.center] = []; byCenter[r.center].push(r); });
+    data.report.forEach(r => {
+      if (!byCenter[r.center]) byCenter[r.center] = [];
+      byCenter[r.center].push(r);
+    });
+    
     for (const [ctr, emps] of Object.entries(byCenter)) {
-      sectionHeader(ctr);
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">${ctr}</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr>
+        <th>Name</th><th>Reg Hrs</th><th>OT Hrs</th><th>Total Hrs</th><th>PTO Hrs</th><th>Pay Increases</th>
+      </tr></thead><tbody>`;
+      
       emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
-      let ctrReg = 0, ctrOT = 0, ctrTotal = 0;
-      const hRows = emps.map(e => {
-        ctrReg += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
+      let ctrRegular = 0, ctrOT = 0, ctrTotal = 0;
+      
+      emps.forEach(e => {
         const hasOT = e.overtimeHours > 0;
+        const hasIncrease = e.payIncreases && e.payIncreases.length > 0;
         const hasPTO = e.ptoDays > 0;
-        return {
-          _bg: hasPTO ? '#EBF4FF' : undefined,
-          cells: [
-            { text: `${e.last_name}, ${e.first_name}`, bold: true },
-            { text: e.regularHours.toFixed(2) },
-            { text: hasOT ? e.overtimeHours.toFixed(2) : '—', color: hasOT ? danger : gray },
-            { text: e.totalHours.toFixed(2), bold: true },
-            { text: hasPTO ? (e.ptoDays * 8).toFixed(2) : '—', color: hasPTO ? '#2471A3' : gray },
-            { text: e.unpaidDays > 0 ? e.unpaidDays + 'd' : '—' }
-          ]
-        };
+        const isNew = e.isNewHire;
+        ctrRegular += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
+        
+        let rowBg = '';
+        if (isNew && hasPTO) rowBg = 'background:#EBF4FF;';
+        else if (isNew) rowBg = 'background:#F0FFF0;';
+        else if (hasPTO) rowBg = 'background:#EBF4FF;';
+        
+        let nameTags = '';
+        if (isNew) nameTags += ' <span style="font-size:9px;background:var(--success);color:white;padding:1px 6px;border-radius:4px;font-weight:700">NEW</span>';
+        if (hasPTO) nameTags += ' <span style="font-size:10px;color:var(--info)">📋 PTO</span>';
+        
+        html += `<tr style="${rowBg}">
+          <td><strong>${e.last_name}, ${e.first_name}</strong>${nameTags}</td>
+          <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;${hasOT?'color:var(--danger);font-weight:700':''}">${hasOT ? e.overtimeHours.toFixed(2) : '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;${hasPTO ? 'font-weight:700;color:var(--info)' : ''}">${hasPTO ? (e.ptoDays * 8).toFixed(2) : '—'}</td>
+          <td>${hasIncrease ? e.payIncreases.map(pi=>'$'+parseFloat(pi.current_rate).toFixed(2)+'→$'+parseFloat(pi.proposed_rate).toFixed(2)).join(', ') : '—'}</td>
+        </tr>`;
       });
-      hRows.push({
-        _bg: navy,
-        cells: [
-          { text: `TOTAL — ${ctr}`, bold: true, color: '#FFFFFF' },
-          { text: ctrReg.toFixed(2), color: '#FFFFFF', bold: true },
-          { text: ctrOT.toFixed(2), color: '#FFFFFF', bold: true },
-          { text: ctrTotal.toFixed(2), color: '#FFFFFF', bold: true },
-          { text: '', color: '#FFFFFF' },
-          { text: '', color: '#FFFFFF' }
-        ]
-      });
-      drawTable(['Name', 'Reg Hrs', 'OT Hrs', 'Total Hrs', 'PTO Hrs', 'Unpaid'], hRows, [160, 75, 75, 80, 75, 67], { aligns: ['left', 'right', 'right', 'right', 'right', 'right'] });
+      
+      html += `<tr style="background:var(--navy);color:white;font-weight:700">
+        <td>TOTAL — ${ctr}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrRegular.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrOT.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrTotal.toFixed(2)}</td>
+        <td colspan="2"></td>
+      </tr>`;
+      html += `</tbody></table></div>`;
     }
-    if (newHireW4s && newHireW4s.length > 0) {
-      for (const emp of newHireW4s) {
-        if (emp.w4Data && emp.w4Data.length > 0) {
-          doc.addPage();
-          doc.rect(0, 0, 612, 40).fill(navy);
-          doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
-            .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
-          doc.fill(gold).fontSize(9).font('Helvetica')
-            .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
-          try {
-            const imgBuffer = Buffer.from(emp.w4Data);
-            const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
-            const isPng = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
-            if (isJpeg || isPng) {
-              doc.image(imgBuffer, 40, 50, { fit: [pageW, 680], align: 'center' });
-            } else {
-              doc.fill(gray).fontSize(11).font('Helvetica')
-                .text('W-4 document attached (non-image format — see original file in Document Center)', 40, 60);
-            }
-          } catch(imgErr) {
-            doc.fill(gray).fontSize(11).font('Helvetica')
-              .text('W-4 document could not be rendered. See Document Center for the original file.', 40, 60);
-          }
-        }
-      }
-    }
-    const totalPages = doc.bufferedPageRange().count;
-    for (let i = 0; i < totalPages; i++) {
-      doc.switchToPage(i);
-      doc.fill(gray).fontSize(7).font('Helvetica')
-        .text(`TCC Payroll Report · ${pp.label} · Page ${i + 1} of ${totalPages}`, 40, 750, { align: 'center', width: pageW });
-    }
-    doc.end();
+    
+    area.innerHTML = html;
+  } catch(e) {
+    area.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`;
+  }
+}
+
+// ========================
+// PAY INCREASES
+// ========================
+async function renderPayIncreases() {
+  const el = document.getElementById('pageContent');
+  const isHR = currentUser.role === 'hr';
+  const canApprove = ['owner','payroll'].includes(currentUser.role);
+  
+  let pis = [];
+  try { pis = await api('/api/pay-increases'); } catch(e) {}
+  
+  let html = '';
+  
+  if (isHR) {
+    html += `<div class="confidentiality-banner">
+      ⚠️ CONFIDENTIAL — Rate of pay per employee is confidential and should not be discussed with anyone except the employee themselves.
+    </div>`;
+  }
+  
+  if (['owner','hr'].includes(currentUser.role)) {
+    html += `<div style="margin-bottom:16px"><button class="btn btn-primary" onclick="showRequestIncrease()">+ Request Pay Increase</button></div>`;
+  }
+  
+  const pending = pis.filter(p => p.status === 'pending');
+  const resolved = pis.filter(p => p.status !== 'pending');
+  
+  if (pending.length > 0) {
+    html += `<div class="card"><div class="card-header"><h3>Pending Requests (${pending.length})</h3></div><div class="card-body">
+      <table class="data-table"><thead><tr><th>Employee</th><th>Center</th><th>Reason</th><th>Current</th><th>Proposed</th><th>Requested By</th><th>Date</th>${canApprove?'<th>Actions</th>':''}</tr></thead><tbody>`;
+    pending.forEach(pi => {
+      html += `<tr>
+        <td><strong>${pi.last_name}, ${pi.first_name}</strong></td><td>${pi.center}</td>
+        <td>${pi.reason_category}${pi.reason_detail ? '<br><small style="color:var(--gray-400)">'+pi.reason_detail+'</small>' : ''}</td>
+        <td style="font-family:'JetBrains Mono',monospace">$${parseFloat(pi.current_rate).toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace;font-weight:700">$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+        <td>${pi.requested_by_name}</td>
+        <td>${new Date(pi.created_at).toLocaleDateString()}</td>
+        ${canApprove ? `<td>
+          <button class="btn btn-success btn-sm" onclick="reviewIncrease(${pi.id},'approved')">Approve</button>
+          <button class="btn btn-danger btn-sm" onclick="reviewIncrease(${pi.id},'denied')">Deny</button>
+        </td>` : ''}
+      </tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+  
+  if (resolved.length > 0) {
+    html += `<div class="card"><div class="card-header"><h3>History</h3></div><div class="card-body">
+      <table class="data-table"><thead><tr><th>Employee</th><th>Reason</th><th>From</th><th>To</th><th>Status</th><th>Reviewed By</th><th>Date</th></tr></thead><tbody>`;
+    resolved.forEach(pi => {
+      const st = pi.status === 'approved' ? 'badge-success' : 'badge-danger';
+      html += `<tr>
+        <td>${pi.last_name}, ${pi.first_name}</td><td>${pi.reason_category}</td>
+        <td>$${parseFloat(pi.current_rate).toFixed(2)}</td><td>$${parseFloat(pi.proposed_rate).toFixed(2)}</td>
+        <td><span class="badge ${st}">${pi.status}</span></td>
+        <td>${pi.reviewed_by_name||'—'}</td><td>${new Date(pi.created_at).toLocaleDateString()}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div></div>`;
+  }
+  
+  if (pis.length === 0) {
+    html += `<div class="empty-state"><div class="icon">📈</div><p>No pay increase requests yet.</p></div>`;
+  }
+  
+  el.innerHTML = html;
+}
+
+function showRequestIncrease() {
+  let html = `<div class="modal-header"><h3>Request Pay Increase</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-group"><label>Employee</label><select id="piEmployee">
+        <option value="">Select employee...</option>
+        ${employees.map(e => `<option value="${e.id}" data-rate="${e.hourly_rate||0}">${e.last_name}, ${e.first_name} — ${e.center}</option>`).join('')}
+      </select></div>
+      <div class="form-group"><label>Reason</label><select id="piReason">
+        ${REASON_CATEGORIES.map(r => `<option value="${r}">${r}</option>`).join('')}
+      </select></div>
+      <div class="form-group"><label>Details / Justification</label><textarea id="piDetail" rows="3" placeholder="Explain why this increase is being requested..."></textarea></div>
+      <div class="form-row">
+        <div class="form-group"><label>Current Rate ($)</label><input id="piCurrentRate" type="number" step="0.01" readonly></div>
+        <div class="form-group"><label>Proposed Rate ($)</label><input id="piProposedRate" type="number" step="0.01"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-gold" onclick="submitIncrease()">Submit Request</button>
+    </div>`;
+  
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  
+  document.getElementById('piEmployee').addEventListener('change', function() {
+    const opt = this.selectedOptions[0];
+    document.getElementById('piCurrentRate').value = opt?.dataset.rate || '';
   });
 }
 
-app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, res) => {
+async function submitIncrease() {
   try {
-    const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const user = req.session.user;
-    const empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY e.center, e.last_name, e.first_name`;
-    const empsResult = await pool.query(empQuery, [pp.start, pp.end]);
-    let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, user));
-    const report = [];
-    for (const emp of empRows) {
-      const sunSatWeeks = getSunSatWeeks(pp.start, pp.end);
-      const allDates = new Set();
-      sunSatWeeks.forEach(w => {
-        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
-          allDates.add(d.toISOString().split('T')[0]);
-      });
-      const allHours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`, [emp.id, [...allDates]]);
-      const hoursMap = {};
-      allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
-      let totalHours = 0;
-      const weekDetails = [];
-      for (const w of sunSatWeeks) {
-        let weekTotal = 0, weekInPeriod = 0;
-        for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1)) {
-          const ds = d.toISOString().split('T')[0];
-          const h = hoursMap[ds] || 0;
-          weekTotal += h;
-          if (ds >= pp.start && ds <= pp.end) weekInPeriod += h;
-        }
-        const weekOT = Math.max(0, weekTotal - 40);
-        weekDetails.push({ ...w, weekTotal, weekOT, weekReg: weekTotal - weekOT, weekInPeriod });
-        totalHours += weekInPeriod;
-      }
-      let periodRegular = 0, periodOT = 0;
-      for (const w of weekDetails) {
-        if (w.weekTotal <= 40) { periodRegular += w.weekInPeriod; }
-        else { periodOT += Math.max(0, w.weekInPeriod - Math.max(0, 40 - (w.weekTotal - w.weekInPeriod))); periodRegular += w.weekInPeriod - Math.max(0, w.weekInPeriod - Math.max(0, 40 - (w.weekTotal - w.weekInPeriod))); }
-      }
-      const pto = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
-      const ptoDays = parseInt(pto.rows[0].count);
-      const unpaid = await pool.query(`SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'U' AND entry_date >= $2 AND entry_date <= $3`, [emp.id, pp.start, pp.end]);
-      const unpaidDays = parseInt(unpaid.rows[0].count);
-      const increases = await pool.query(`SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`, [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']);
-      report.push({
-        id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
-        is_full_time: emp.is_full_time, start_date: emp.start_date,
-        totalHours: Math.round(totalHours * 100) / 100,
-        regularHours: Math.round(periodRegular * 100) / 100,
-        overtimeHours: Math.round(periodOT * 100) / 100,
-        ptoDays, unpaidDays, payIncreases: increases.rows, weekDetails
-      });
-    }
-    const termResult = await pool.query(
-      `SELECT * FROM employees WHERE is_active = FALSE AND terminated_date IS NOT NULL AND terminated_date >= $1 ORDER BY terminated_date DESC`, [pp.start]);
-    const terminations = termResult.rows.map(t => ({
-      id: t.id, first_name: t.first_name, last_name: t.last_name,
-      center: t.center, terminated_date: t.terminated_date,
-      termination_reason: t.termination_reason, terminated_by: t.terminated_by
-    }));
-    const ppStartDate = new Date(pp.start + 'T12:00:00');
-    const ppEndDate = new Date(pp.end + 'T12:00:00');
-    const newHireW4s = [];
-    for (const emp of empRows) {
-      if (emp.start_date) {
-        const sd = new Date(emp.start_date);
-        if (sd >= ppStartDate && sd <= ppEndDate) {
-          const w4 = await pool.query(
-            `SELECT file_data FROM documents WHERE employee_id = $1 AND doc_type = 'W-4' ORDER BY created_at DESC LIMIT 1`, [emp.id]);
-          newHireW4s.push({
-            id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-            center: emp.center, position: emp.position, start_date: emp.start_date,
-            hourly_rate: emp.hourly_rate, hasW4: w4.rows.length > 0,
-            w4Data: w4.rows.length > 0 ? w4.rows[0].file_data : null
-          });
-        }
-      }
-    }
-    const pdfBuffer = await generatePayrollPDF(pp, report, terminations, newHireW4s);
-    await pool.query(
-      `INSERT INTO payroll_report_archives (period_start, period_end, pay_date, period_label, report_data, pdf_data, generated_by, generated_by_user_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (period_start, period_end) DO UPDATE SET report_data = $5, pdf_data = $6, generated_by = $7, generated_by_user_id = $8, pay_date = $3, period_label = $4, created_at = NOW()`,
-      [pp.start, pp.end, pp.payDate, pp.label, JSON.stringify({ payPeriod: pp, report, terminations }), pdfBuffer, user.full_name, user.id]
-    );
-    const filename = `TCC-Payroll-${pp.start}-to-${pp.end}.pdf`;
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(pdfBuffer);
-  } catch (err) {
-    console.error('PDF generation error:', err);
-    res.status(500).json({ error: err.message });
+    await api('/api/pay-increases', { method: 'POST', body: {
+      employee_id: parseInt(document.getElementById('piEmployee').value),
+      reason_category: document.getElementById('piReason').value,
+      reason_detail: document.getElementById('piDetail').value,
+      current_rate: parseFloat(document.getElementById('piCurrentRate').value),
+      proposed_rate: parseFloat(document.getElementById('piProposedRate').value)
+    }});
+    closeModal();
+    renderPayIncreases();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function reviewIncrease(id, status) {
+  const notes = prompt(`${status === 'approved' ? 'Approval' : 'Denial'} notes (optional):`);
+  try {
+    await api(`/api/pay-increases/${id}`, { method: 'PUT', body: { status, review_notes: notes || '' } });
+    await loadEmployees();
+    renderPayIncreases();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// DOCUMENTS
+// ========================
+async function renderDocuments() {
+  const el = document.getElementById('pageContent');
+  
+  let html = `<div class="card"><div class="card-header"><h3>Upload Document</h3></div><div class="card-body">
+    <div class="form-row-3">
+      <div class="form-group"><label>Employee</label><select id="docEmployee">
+        <option value="">Select...</option>
+        ${employees.map(e => `<option value="${e.id}">${e.last_name}, ${e.first_name}</option>`).join('')}
+      </select></div>
+      <div class="form-group"><label>Document Type</label><select id="docType">
+        <option>W-4</option><option>I-9</option><option>New Hire Packet</option><option>Direct Deposit</option>
+        <option>CDA Certificate</option><option>Degree/Transcript</option><option>Background Check</option>
+        <option>Other</option>
+      </select></div>
+      <div class="form-group"><label>Affects Pay Period</label><input id="docPayPeriod" placeholder="e.g. Mar 9-23, 2026"></div>
+    </div>
+    <div class="form-group"><label>Notes</label><input id="docNotes" placeholder="Any notes about this document..."></div>
+    <div class="form-group"><label>File</label><input type="file" id="docFile"></div>
+    <button class="btn btn-primary" onclick="uploadDoc()">Upload</button>
+    <div id="docResult" style="margin-top:12px"></div>
+  </div></div>`;
+  
+  el.innerHTML = html;
+}
+
+async function uploadDoc() {
+  const file = document.getElementById('docFile').files[0];
+  if (!file) return alert('Select a file.');
+  
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('employee_id', document.getElementById('docEmployee').value);
+  fd.append('doc_type', document.getElementById('docType').value);
+  fd.append('notes', document.getElementById('docNotes').value);
+  fd.append('affects_pay_period', document.getElementById('docPayPeriod').value);
+  
+  const result = await apiForm('/api/documents', fd);
+  document.getElementById('docResult').innerHTML = result.error
+    ? `<span style="color:var(--danger)">${result.error}</span>`
+    : `<span style="color:var(--success)">✅ Uploaded: ${result.file_name}</span>`;
+}
+
+// ========================
+// STAFFING PLAN
+// ========================
+async function renderStaffingPlan() {
+  const el = document.getElementById('pageContent');
+  const canEdit = ['owner','hr','director'].includes(currentUser.role);
+  
+  let html = `<div class="center-tabs">`;
+  if (currentUser.role !== 'director') {
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderStaffingPlan()">${c}</div>`;
+    });
   }
+  html += `</div>`;
+  
+  const center = currentUser.role === 'director' ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
+  if (selectedCenter === 'all' && currentUser.role !== 'director') selectedCenter = 'Peace Boulevard';
+  
+  // Signature display
+  try {
+    const sig = await api('/api/settings/signature');
+    if (sig && sig.value) {
+      html += `<div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;background:white;padding:12px 20px;border-radius:var(--radius);box-shadow:var(--shadow-sm)">
+        <span style="font-size:12px;font-weight:600;color:var(--gray-600)">Licensee Signature:</span>
+        <img src="${sig.value}" style="height:40px">
+        <span style="font-size:12px;color:var(--gray-400)">Date: ${new Date(sig.updated_at).toLocaleDateString()}</span>
+      </div>`;
+    }
+  } catch(e) {}
+  
+  // Load staffing plan data from DB
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  
+  // Filter to this center and deduplicate
+  const seen = new Set();
+  const centerData = spData.filter(s => {
+    if (s.center !== center) return false;
+    // External entries (employee_id=NULL) use sp id as key so multiples are allowed
+    const key = s.employee_id ? `emp-${s.employee_id}-${s.entry_type || 'staff'}` : `ext-${s.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  
+  // Find unassigned staff
+  const assignedIds = new Set(centerData.map(s => s.employee_id));
+  const centerEmployees = employees.filter(e => e.center === center);
+  const unassigned = centerEmployees.filter(e => !assignedIds.has(e.id));
+  
+  // Group by classroom
+  const classroomMap = {};
+  centerData.forEach(s => {
+    if (!classroomMap[s.classroom]) classroomMap[s.classroom] = [];
+    classroomMap[s.classroom].push(s);
+  });
+  
+  const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const templateSections = template.map(t => t.section);
+  
+  // Only show classrooms from this center's template — no extras
+  const nonTemplateStaff = [];
+  Object.keys(classroomMap).forEach(c => {
+    if (!templateSections.includes(c)) {
+      classroomMap[c].forEach(s => {
+        if ((s.entry_type || 'staff') === 'staff') nonTemplateStaff.push(s);
+      });
+    }
+  });
+  const orderedClassrooms = [...templateSections];
+  
+  const canManageSubs = ['owner','hr','payroll'].includes(currentUser.role);
+  
+  // Build flat list of all staff with their classroom for move functionality
+  window._spCenter = center;
+  window._spClassrooms = orderedClassrooms;
+  
+  // ---- UNASSIGNED STAFF SECTION ----
+  const wrongClassroomStaff = nonTemplateStaff.filter(s => s.employee_id && !unassigned.find(u => u.id === s.employee_id));
+  if (canEdit && (unassigned.length > 0 || wrongClassroomStaff.length > 0)) {
+    const totalCount = unassigned.length + wrongClassroomStaff.length;
+    html += `<div class="card" style="border-left:4px solid var(--warning);margin-bottom:20px">
+      <div class="card-header"><h3>⚠️ Needs Room/Role Assignment (${totalCount})</h3></div>
+      <div class="card-body">
+      <div style="display:flex;flex-wrap:wrap;gap:8px">`;
+    unassigned.forEach(e => {
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--warning-bg);border:1.5px solid var(--warning);border-radius:20px;font-size:12px;font-weight:600">
+        👤 ${e.last_name}, ${e.first_name}
+        <span style="font-size:10px;color:var(--gray-400)">${e.position||''}</span>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="quickAssign(${e.id},'${center.replace(/'/g,"\\'")}')">Assign →</button>
+      </div>`;
+    });
+    wrongClassroomStaff.forEach(s => {
+      html += `<div style="display:inline-flex;align-items:center;gap:6px;padding:8px 14px;background:var(--danger-bg);border:1.5px solid var(--danger);border-radius:20px;font-size:12px;font-weight:600">
+        👤 ${s.first_name} ${s.last_name}
+        <span style="font-size:10px;color:var(--danger)">Wrong classroom: "${s.classroom}"</span>
+        <button class="btn btn-outline btn-sm" style="padding:2px 8px;font-size:10px;margin-left:4px" onclick="moveStaffEntry(${s.id},'${(s.first_name||'')} ${(s.last_name||'')}')">Reassign →</button>
+      </div>`;
+    });
+    html += `</div></div></div>`;
+  }
+  
+  // ---- STAFFING PLAN TABLE with move handles ----
+  html += `<div class="card"><div class="card-header">
+    <h3>Staffing Plan — ${center}</h3>
+    <div style="display:flex;gap:8px;align-items:center">
+      <div style="font-size:11px;color:var(--gray-400)">License #DC110415511 · Mary Wardlaw, Licensee</div>
+      ${canEdit ? `<button class="btn btn-primary btn-sm" onclick="showAddStaffingEntry('${center}')">+ Add Staff</button>` : ''}
+      <button class="btn btn-outline btn-sm" onclick="window.open('/api/staffing-plan/print/${encodeURIComponent(center)}','_blank')">🖨️ Print</button>
+    </div>
+  </div><div class="card-body"><div class="table-scroll">
+    <table class="data-table" style="font-size:11px">
+      <thead><tr>
+        ${canEdit ? '<th style="width:30px"></th>' : ''}
+        <th>Classroom</th><th>Role</th><th>Name</th><th>Start Date</th><th>Schedule</th>
+        <th>Orientation</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Refresh</th>
+        <th>CCBC</th><th>Fingerprint</th><th>Eligible</th><th>Abuse/Neglect</th>
+        <th>Last Eval</th><th>Promoted</th><th>Room Assgn</th>
+        <th>Education</th><th>Hours/CEUs</th><th>I/T Training</th>
+        ${canEdit ? '<th>Actions</th>' : ''}
+      </tr></thead><tbody>`;
+  
+  // Helper for highlighting empty compliance cells
+  function cc(val, required) {
+    const formatted = fmtDate(val);
+    if (!formatted && required) return '<td style="background:#FFF3CD;color:var(--warning);font-weight:600;text-align:center">⚠</td>';
+    return '<td>' + formatted + '</td>';
+  }
+  
+  orderedClassrooms.forEach(classroom => {
+    const staff = classroomMap[classroom] || [];
+    const colSpan = canEdit ? 21 : 19;
+    const isSubs = classroom === 'Subs from other centers';
+    const isTherapists = classroom === 'Therapist / Unsupervised Volunteers';
+    const isVolunteers = classroom === 'Supervised Volunteers';
+    const isAdmin = classroom === 'Admin / Office / Food Prep';
+    
+    html += `<tr style="background:var(--navy);color:white">
+      <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <span>${classroom}</span>
+          <span style="display:flex;gap:6px">`;
+    if (canManageSubs && isSubs) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showPullSubModal('${center.replace(/'/g,"\\'")}')">+ Pull Staff from Another Center</button>`;
+    }
+    if (canManageSubs && (isTherapists || isVolunteers)) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showAddExternalModal('${center.replace(/'/g,"\\'")}','${classroom.replace(/'/g,"\\'")}')">+ Add ${isTherapists ? 'Therapist/Volunteer' : 'Volunteer'}</button>`;
+    }
+    if (canEdit && isAdmin) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showAddStaffToSection('${center.replace(/'/g,"\\'")}','Admin / Office / Food Prep')">+ Add Staff</button>`;
+    }
+    html += `</span></div></td></tr>`;
+    
+    if (staff.length === 0) {
+      html += `<tr><td colspan="${colSpan}" style="color:var(--gray-300);font-style:italic;padding-left:30px">No staff assigned</td></tr>`;
+    }
+    
+    // Helper for external/volunteer rows - only show applicable fields
+    function ccExt(val, applicable) {
+      if (!applicable) return '<td style="background:var(--gray-100);color:var(--gray-300);text-align:center;font-size:9px">n/a</td>';
+      const formatted = fmtDate(val);
+      if (!formatted) return '<td style="background:#FFF3CD;color:var(--warning);font-weight:600;text-align:center">⚠</td>';
+      return '<td>' + formatted + '</td>';
+    }
+    
+    staff.forEach(s => {
+      const isSub = s.entry_type === 'sub';
+      const isExternal = s.entry_type === 'external';
+      const nameDisplay = (s.first_name || '') + ' ' + (s.last_name || '');
+      const isVolunteerEntry = isExternal && (isTherapists || isVolunteers);
+      
+      let nameBadges = '';
+      if (isSub && s.source_center) nameBadges += ` <span style="font-size:9px;background:var(--info-bg);color:var(--info);padding:1px 6px;border-radius:4px;font-weight:600">📍 ${s.source_center}</span>`;
+      if (isExternal) nameBadges += ` <span style="font-size:9px;background:var(--gold-pale);color:var(--gold);padding:1px 6px;border-radius:4px;font-weight:600">External</span>`;
+      if (isSub) nameBadges += ` <span style="font-size:9px;background:rgba(46,125,79,0.1);color:var(--success);padding:1px 6px;border-radius:4px;font-weight:600">🔄 Live Sync</span>`;
+      
+      html += `<tr data-sp-id="${s.id}" style="${isSub ? 'background:rgba(36,113,163,0.04)' : isExternal ? 'background:rgba(200,150,62,0.04)' : ''}">
+        ${canEdit && !isSub ? `<td style="text-align:center;cursor:pointer" title="Move to different classroom" onclick="moveStaffEntry(${s.id},'${(s.first_name||'')} ${(s.last_name||'')}')"><span style="font-size:14px;cursor:grab">☰</span></td>` : canEdit ? '<td></td>' : ''}
+        <td></td>
+        <td><strong>${s.role_in_room || ''}</strong></td>
+        <td style="white-space:nowrap">${nameDisplay}${nameBadges}</td>
+        <td>${fmtDate(s.emp_start_date || s.external_start_date)}</td>
+        <td style="font-size:10px">${s.emp_schedule || ''}</td>`;
+      
+      if (isVolunteerEntry) {
+        html += ccExt(null, false); // orientation
+        html += ccExt(null, false); // CPR
+        html += ccExt(null, false); // H&S ABC
+        html += ccExt(null, false); // H&S Refresher
+        html += ccExt(null, false); // CCBC
+        html += ccExt(s.fingerprinting_date, true); // fingerprint
+        html += ccExt(s.date_eligible, true); // eligible
+        html += ccExt(s.abuse_neglect_statement, true); // abuse/neglect
+        html += ccExt(null, false); // last eval
+        html += ccExt(null, false); // promoted
+        html += ccExt(null, false); // room assigned
+        html += '<td></td><td></td><td></td>';
+      } else {
+        html += cc(s.orientation_date, true);
+        html += cc(s.cpr_first_aid_date, true);
+        html += cc(s.health_safety_abc_date, true);
+        html += cc(s.health_safety_refresher, true);
+        html += cc(s.ccbc_consent_date, true);
+        html += cc(s.fingerprinting_date, true);
+        html += cc(s.date_eligible, true);
+        html += cc(s.abuse_neglect_statement, true);
+        html += cc(s.last_evaluation, false);
+        html += cc(s.date_promoted_lead, false);
+        html += cc(s.date_assigned_room, false);
+        html += `<td style="font-size:10px">${s.education || ''}</td>`;
+        html += `<td style="font-size:10px">${s.semester_hours || ''}</td>`;
+        html += `<td style="font-size:10px">${s.infant_toddler_training || ''}</td>`;
+      }
+      
+      if (canEdit) {
+        if (isSub) {
+          html += `<td>${canManageSubs ? `<button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove sub" style="color:var(--danger)">✕</button>` : ''}</td>`;
+        } else if (isExternal) {
+          html += `<td style="white-space:nowrap">${canManageSubs ? `<button class="btn btn-outline btn-sm" onclick="editExternalEntry(${s.id})" title="Edit">✏️</button> <button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove" style="color:var(--danger)">✕</button>` : ''}</td>`;
+        } else {
+          html += `<td style="white-space:nowrap">
+          <button class="btn btn-outline btn-sm" onclick="editStaffingEntry(${s.id})" title="Edit">✏️</button>
+          <button class="btn btn-outline btn-sm" onclick="removeStaffingEntry(${s.id})" title="Remove" style="color:var(--danger)">✕</button>
+        </td>`;
+        }
+      }
+      html += `</tr>`;
+    });
+  });
+  
+  html += `</tbody></table></div></div></div>`;
+  el.innerHTML = html;
+}
+
+// Move staff to a different classroom via modal
+function moveStaffEntry(spId, empName) {
+  const classrooms = window._spClassrooms || [];
+  const center = window._spCenter || '';
+  
+  let html = `<div class="modal-header"><h3>Move ${empName}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">Select the new classroom and role for ${empName}. All compliance data will be preserved.</p>
+      <div class="form-row">
+        <div class="form-group"><label>New Classroom</label><select id="moveClassroom" style="font-size:14px">
+          ${classrooms.map(c => `<option value="${c}">${c}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="moveRole" style="font-size:14px">
+          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option>
+          <option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doMoveStaff(${spId},'${center.replace(/'/g,"\\'")}')">Move</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doMoveStaff(spId, center) {
+  try {
+    // Get the current entry to preserve all compliance data
+    let spData = await api('/api/staffing-plan');
+    const entry = spData.find(s => s.id === spId);
+    if (!entry) { alert('Entry not found'); return; }
+    
+    const newClassroom = document.getElementById('moveClassroom').value;
+    const newRole = document.getElementById('moveRole').value;
+    
+    await api(`/api/staffing-plan/${spId}`, { method: 'PUT', body: {
+      employee_id: entry.employee_id, center,
+      classroom: newClassroom, role_in_room: newRole,
+      orientation_date: datVal(entry.orientation_date) || null,
+      cpr_first_aid_date: datVal(entry.cpr_first_aid_date) || null,
+      health_safety_abc_date: datVal(entry.health_safety_abc_date) || null,
+      health_safety_refresher: datVal(entry.health_safety_refresher) || null,
+      ccbc_consent_date: datVal(entry.ccbc_consent_date) || null,
+      fingerprinting_date: datVal(entry.fingerprinting_date) || null,
+      date_eligible: datVal(entry.date_eligible) || null,
+      abuse_neglect_statement: datVal(entry.abuse_neglect_statement) || null,
+      last_evaluation: datVal(entry.last_evaluation) || null,
+      date_promoted_lead: datVal(entry.date_promoted_lead) || null,
+      date_assigned_room: datVal(entry.date_assigned_room) || null,
+      education: entry.education || null,
+      semester_hours: entry.semester_hours || null,
+      infant_toddler_training: entry.infant_toddler_training || null
+    }});
+    closeModal();
+    await loadEmployees();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function quickAssign(empId, center) {
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const emp = employees.find(e => e.id === empId);
+  
+  let html = `<div class="modal-header"><h3>Assign ${emp?.first_name} ${emp?.last_name}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Classroom</label><select id="qaClassroom">
+          ${classrooms.map(c => `<option value="${c.section}">${c.section}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="qaRole">
+          <option>Assistant</option><option>Lead</option><option>Co-Lead</option><option>Caregiver</option><option>Floater</option><option>Sub</option><option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doQuickAssign(${empId},'${center.replace(/'/g,"\\'")}')">Assign</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doQuickAssign(empId, center) {
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: empId, center,
+      classroom: document.getElementById('qaClassroom').value,
+      role_in_room: document.getElementById('qaRole').value,
+      orientation_date:null,cpr_first_aid_date:null,health_safety_abc_date:null,health_safety_refresher:null,
+      ccbc_consent_date:null,fingerprinting_date:null,date_eligible:null,abuse_neglect_statement:null,
+      last_evaluation:null,date_promoted_lead:null,date_assigned_room:null,education:null,semester_hours:null,infant_toddler_training:null
+    }});
+    closeModal();
+    await loadEmployees();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function showAddStaffingEntry(center) {
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  let html = `<div class="modal-header"><h3>Add Staff to Staffing Plan</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Employee</label><select id="spEmployee">
+          <option value="">Select employee...</option>
+          ${employees.filter(e => e.center === center || ['owner','hr'].includes(currentUser.role)).map(e => `<option value="${e.id}">${e.last_name}, ${e.first_name} (${e.center})</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="spRole">
+          <option>Lead</option><option>Co-Lead</option><option>Assistant</option><option>Caregiver</option><option>Floater</option><option>Sub</option><option>Director</option><option>Asst. Director</option><option>Office</option><option>Food Prep</option>
+        </select></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>Classroom</label>
+          <select id="spClassroom">
+            ${classrooms.map(c => `<option value="${c.section}">${c.section}</option>`).join('')}
+            <option value="__custom">— Custom classroom —</option>
+          </select>
+        </div>
+        <div class="form-group" id="spCustomClassroomGroup" style="display:none"><label>Custom Classroom Name</label><input id="spCustomClassroom"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveStaffingEntry('${center}')">Add to Staffing Plan</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  
+  document.getElementById('spClassroom').addEventListener('change', function() {
+    document.getElementById('spCustomClassroomGroup').style.display = this.value === '__custom' ? 'block' : 'none';
+  });
+}
+
+async function saveStaffingEntry(center) {
+  const empId = document.getElementById('spEmployee').value;
+  if (!empId) return alert('Please select an employee.');
+  let classroom = document.getElementById('spClassroom').value;
+  if (classroom === '__custom') classroom = document.getElementById('spCustomClassroom').value;
+  if (!classroom) return alert('Please select or enter a classroom.');
+  const role = document.getElementById('spRole').value;
+  
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: parseInt(empId), center, classroom, role_in_room: role,
+      orientation_date:null, cpr_first_aid_date:null, health_safety_abc_date:null, health_safety_refresher:null,
+      ccbc_consent_date:null, fingerprinting_date:null, date_eligible:null, abuse_neglect_statement:null,
+      last_evaluation:null, date_promoted_lead:null, date_assigned_room:null, education:null, semester_hours:null, infant_toddler_training:null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// Add staff directly to a specific section (Admin/Office/Food Prep)
+function showAddStaffToSection(center, sectionName) {
+  const roles = sectionName === 'Admin / Office / Food Prep'
+    ? ['Director','Asst. Director','Office','Food Prep','Custodian','Other']
+    : ['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub','Director','Asst. Director','Office','Food Prep'];
+  
+  let html = `<div class="modal-header"><h3>Add Staff to ${sectionName}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Employee</label><select id="secEmployee">
+          <option value="">Select employee...</option>
+          ${employees.map(e => '<option value="' + e.id + '">' + e.last_name + ', ' + e.first_name + ' (' + e.center + ')</option>').join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="secRole">
+          ${roles.map(r => '<option>' + r + '</option>').join('')}
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doAddStaffToSection('${center.replace(/'/g,"\\'")}','${sectionName.replace(/'/g,"\\'")}')">Add to ${sectionName}</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doAddStaffToSection(center, sectionName) {
+  const empId = document.getElementById('secEmployee').value;
+  if (!empId) return alert('Please select an employee.');
+  const role = document.getElementById('secRole').value;
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: parseInt(empId), center, classroom: sectionName, role_in_room: role,
+      orientation_date:null, cpr_first_aid_date:null, health_safety_abc_date:null, health_safety_refresher:null,
+      ccbc_consent_date:null, fingerprinting_date:null, date_eligible:null, abuse_neglect_statement:null,
+      last_evaluation:null, date_promoted_lead:null, date_assigned_room:null, education:null, semester_hours:null, infant_toddler_training:null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function editStaffingEntry(spId) {
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  const entry = spData.find(s => s.id === spId);
+  if (!entry) return alert('Entry not found');
+  
+  const center = entry.center;
+  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  
+  let html = `<div class="modal-header"><h3>Edit Staffing Entry</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:14px;font-weight:600;margin-bottom:16px">${entry.first_name} ${entry.last_name}</p>
+      <div class="form-row">
+        <div class="form-group"><label>Role</label><select id="spEditRole">
+          ${['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub','Director','Asst. Director','Office','Food Prep'].map(r => `<option${r===entry.role_in_room?' selected':''}>${r}</option>`).join('')}
+        </select></div>
+        <div class="form-group"><label>Classroom</label>
+          <input id="spEditClassroom" value="${entry.classroom}" list="classroomList">
+          <datalist id="classroomList">${classrooms.map(c => `<option value="${c.section}">`).join('')}</datalist>
+        </div>
+      </div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Compliance Dates</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Orientation</label><input type="date" id="spOri" value="${datVal(entry.orientation_date)}"></div>
+        <div class="form-group"><label>CPR/First Aid</label><input type="date" id="spCpr" value="${datVal(entry.cpr_first_aid_date)}"></div>
+        <div class="form-group"><label>H&S ABC</label><input type="date" id="spAbc" value="${datVal(entry.health_safety_abc_date)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>H&S Refresher</label><input type="date" id="spRef" value="${datVal(entry.health_safety_refresher)}"></div>
+        <div class="form-group"><label>CCBC Consent</label><input type="date" id="spCcbc" value="${datVal(entry.ccbc_consent_date)}"></div>
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="spFp" value="${datVal(entry.fingerprinting_date)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="spElig" value="${datVal(entry.date_eligible)}"></div>
+        <div class="form-group"><label>Abuse/Neglect</label><input type="date" id="spAbuse" value="${datVal(entry.abuse_neglect_statement)}"></div>
+        <div class="form-group"><label>Last Evaluation</label><input type="date" id="spEval" value="${datVal(entry.last_evaluation)}"></div>
+      </div>
+      <div class="form-row-3">
+        <div class="form-group"><label>Promoted to Lead</label><input type="date" id="spProm" value="${datVal(entry.date_promoted_lead)}"></div>
+        <div class="form-group"><label>Room Assigned</label><input type="date" id="spAssign" value="${datVal(entry.date_assigned_room)}"></div>
+        <div class="form-group"></div>
+      </div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Education & Training</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Education</label><input id="spEdu" value="${entry.education||''}"></div>
+        <div class="form-group"><label>Hours/CEUs</label><input id="spHrs" value="${entry.semester_hours||''}"></div>
+        <div class="form-group"><label>I/T Training</label><input id="spIT" value="${entry.infant_toddler_training||''}"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="updateStaffingEntry(${spId},'${center}')">Save Changes</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+function datVal(d) {
+  if (!d) return '';
+  const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d);
+  const match = s.match(/(\d{4}-\d{2}-\d{2})/);
+  return match ? match[1] : '';
+}
+
+async function updateStaffingEntry(spId, center) {
+  try {
+    // Get the current entry to preserve employee_id
+    let spData = await api('/api/staffing-plan');
+    const entry = spData.find(s => s.id === spId);
+    
+    await api(`/api/staffing-plan/${spId}`, { method: 'PUT', body: {
+      employee_id: entry.employee_id, center,
+      classroom: document.getElementById('spEditClassroom').value,
+      role_in_room: document.getElementById('spEditRole').value,
+      orientation_date: document.getElementById('spOri').value || null,
+      cpr_first_aid_date: document.getElementById('spCpr').value || null,
+      health_safety_abc_date: document.getElementById('spAbc').value || null,
+      health_safety_refresher: document.getElementById('spRef').value || null,
+      ccbc_consent_date: document.getElementById('spCcbc').value || null,
+      fingerprinting_date: document.getElementById('spFp').value || null,
+      date_eligible: document.getElementById('spElig').value || null,
+      abuse_neglect_statement: document.getElementById('spAbuse').value || null,
+      last_evaluation: document.getElementById('spEval').value || null,
+      date_promoted_lead: document.getElementById('spProm').value || null,
+      date_assigned_room: document.getElementById('spAssign').value || null,
+      education: document.getElementById('spEdu').value || null,
+      semester_hours: document.getElementById('spHrs').value || null,
+      infant_toddler_training: document.getElementById('spIT').value || null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function removeStaffingEntry(spId) {
+  if (!confirm('Remove this entry from the staffing plan? Employee data will be preserved.')) return;
+  try {
+    await api(`/api/staffing-plan/${spId}`, { method: 'DELETE' });
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// PULL SUB FROM ANOTHER CENTER (Option B: Live Lookup)
+// ========================
+async function showPullSubModal(targetCenter) {
+  let html = `<div class="modal-header"><h3>Pull Staff from Another Center</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:4px">Select an employee from another center to add as a sub at <strong>${targetCenter}</strong>.</p>
+      <p style="font-size:12px;color:var(--info);margin-bottom:16px">Their compliance dates will be <strong>synced live</strong> from their home center's staffing plan — Amy only needs to update dates in one place.</p>
+      <div id="pullSubList"><em style="color:var(--gray-400)">Loading staff from other centers...</em></div>
+    </div>
+    <div class="modal-footer"><button class="btn btn-outline" onclick="closeModal()">Close</button></div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+  try {
+    const available = await api('/api/staffing-plan/available-subs/' + encodeURIComponent(targetCenter));
+    if (available.length === 0) { document.getElementById('pullSubList').innerHTML = '<p style="color:var(--gray-400)">No staff found at other centers.</p>'; return; }
+    const byCenter = {};
+    available.forEach(e => { if (!byCenter[e.center]) byCenter[e.center] = []; byCenter[e.center].push(e); });
+    let listHtml = '';
+    for (const [ctr, emps] of Object.entries(byCenter)) {
+      listHtml += '<div style="margin-bottom:16px"><div style="font-size:13px;font-weight:700;color:var(--navy);margin-bottom:8px;padding-bottom:4px;border-bottom:2px solid var(--gold-pale)">📍 ' + ctr + '</div>';
+      emps.forEach(e => {
+        const already = e.already_added;
+        listHtml += '<div style="display:flex;align-items:center;justify-content:space-between;padding:8px 12px;border-radius:8px;margin-bottom:4px;' + (already ? 'background:var(--success-bg)' : 'background:var(--gray-50)') + '">' +
+          '<div><strong>' + e.last_name + ', ' + e.first_name + '</strong> <span style="font-size:11px;color:var(--gray-400);margin-left:8px">' + (e.position||'') + ' · ' + (e.classroom||'') + '</span></div>' +
+          (already ? '<span style="font-size:11px;color:var(--success);font-weight:600">✅ Already added</span>'
+            : '<button class="btn btn-primary btn-sm" onclick="doPullSub(' + e.id + ',\'' + targetCenter.replace(/'/g,"\\'") + '\')">+ Add as Sub</button>') + '</div>';
+      });
+      listHtml += '</div>';
+    }
+    document.getElementById('pullSubList').innerHTML = listHtml;
+  } catch(e) { document.getElementById('pullSubList').innerHTML = '<div style="color:var(--danger)">Error: ' + e.message + '</div>'; }
+}
+
+async function doPullSub(employeeId, targetCenter) {
+  try {
+    await api('/api/staffing-plan/pull-sub', { method: 'POST', body: { employee_id: employeeId, target_center: targetCenter, classroom: 'Subs from other centers' }});
+    showPullSubModal(targetCenter);
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// ADD EXTERNAL PERSON (Therapist/Volunteer)
+// ========================
+function showAddExternalModal(center, classroom) {
+  let html = `<div class="modal-header"><h3>Add ${classroom.includes('Unsupervised') ? 'Therapist / Volunteer' : 'Volunteer'}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <p style="font-size:13px;color:var(--gray-600);margin-bottom:4px">Add a therapist or volunteer who is <strong>not</strong> on the employee roster. They will only appear on the staffing plan for licensing purposes.</p>
+      <p style="font-size:12px;color:var(--gold);margin-bottom:16px">This person will not show up on the roster, PTO summary, payroll, or any other screen.</p>
+      <div class="form-row">
+        <div class="form-group"><label>Full Name <span style="color:var(--danger)">*</span></label><input id="extName" placeholder="e.g. Dr. Sarah Johnson"></div>
+        <div class="form-group"><label>Role / Title</label><input id="extRole" placeholder="e.g. Speech Therapist, Volunteer"></div>
+      </div>
+      <div class="form-group"><label>Start Date</label><input type="date" id="extStartDate"></div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Required Compliance</h4>
+      <p style="font-size:11px;color:var(--gray-400);margin-bottom:12px">Only fingerprint, eligible date, and abuse/neglect statement apply to volunteers and therapists.</p>
+      <div class="form-row-3">
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="extFp"></div>
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="extElig"></div>
+        <div class="form-group"><label>Abuse/Neglect Statement</label><input type="date" id="extAbuse"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doAddExternal('${center.replace(/'/g,"\\'")}','${classroom.replace(/'/g,"\\'")}')">Add to Staffing Plan</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doAddExternal(center, classroom) {
+  const name = document.getElementById('extName').value.trim();
+  if (!name) { alert('Please enter a name.'); return; }
+  try {
+    await api('/api/staffing-plan/add-external', { method: 'POST', body: {
+      external_name: name, center, classroom,
+      role_in_room: document.getElementById('extRole').value.trim() || '',
+      external_start_date: document.getElementById('extStartDate').value || null,
+      fingerprinting_date: document.getElementById('extFp').value || null,
+      date_eligible: document.getElementById('extElig').value || null,
+      abuse_neglect_statement: document.getElementById('extAbuse').value || null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// EDIT EXTERNAL PERSON
+// ========================
+async function editExternalEntry(spId) {
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  const entry = spData.find(s => s.id === spId);
+  if (!entry) return alert('Entry not found');
+  const displayName = entry.external_name || ((entry.first_name||'') + ' ' + (entry.last_name||'')).trim();
+  let html = `<div class="modal-header"><h3>Edit External Person</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Full Name</label><input id="extEditName" value="${displayName}"></div>
+        <div class="form-group"><label>Role / Title</label><input id="extEditRole" value="${entry.role_in_room||''}"></div>
+      </div>
+      <div class="form-group"><label>Start Date</label><input type="date" id="extEditStartDate" value="${datVal(entry.external_start_date)}"></div>
+      <h4 style="font-size:13px;font-weight:700;color:var(--navy);margin:16px 0 8px;border-bottom:1px solid var(--gray-200);padding-bottom:4px">Required Compliance</h4>
+      <div class="form-row-3">
+        <div class="form-group"><label>Fingerprinting</label><input type="date" id="extEditFp" value="${datVal(entry.fingerprinting_date)}"></div>
+        <div class="form-group"><label>Date Eligible</label><input type="date" id="extEditElig" value="${datVal(entry.date_eligible)}"></div>
+        <div class="form-group"><label>Abuse/Neglect Statement</label><input type="date" id="extEditAbuse" value="${datVal(entry.abuse_neglect_statement)}"></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doUpdateExternal(${spId},'${(entry.center||'').replace(/'/g,"\\'")}','${(entry.classroom||'').replace(/'/g,"\\'")}')">Save Changes</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doUpdateExternal(spId, center, classroom) {
+  try {
+    await api('/api/staffing-plan/' + spId, { method: 'PUT', body: {
+      employee_id: null, center, classroom,
+      role_in_room: document.getElementById('extEditRole').value.trim() || '',
+      external_name: document.getElementById('extEditName').value.trim(),
+      entry_type: 'external',
+      external_start_date: document.getElementById('extEditStartDate').value || null,
+      fingerprinting_date: document.getElementById('extEditFp').value || null,
+      date_eligible: document.getElementById('extEditElig').value || null,
+      abuse_neglect_statement: document.getElementById('extEditAbuse').value || null,
+      orientation_date: null, cpr_first_aid_date: null, health_safety_abc_date: null,
+      health_safety_refresher: null, ccbc_consent_date: null, last_evaluation: null,
+      date_promoted_lead: null, date_assigned_room: null, education: null,
+      semester_hours: null, infant_toddler_training: null, source_center: null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+function fmtDate(d) {
+  if (!d) return '';
+  // Handle both ISO strings and date objects
+  const s = typeof d === 'string' ? d : String(d);
+  const match = s.match(/(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return '';
+  const [_, y, m, day] = match;
+  return `${parseInt(m)}/${parseInt(day)}/${y.slice(2)}`;
+}
+
+// ========================
+// SIGNATURE
+// ========================
+function renderSignature() {
+  const el = document.getElementById('pageContent');
+  el.innerHTML = `<div class="card"><div class="card-header"><h3>Your Signature</h3></div><div class="card-body">
+    <p style="font-size:13px;color:var(--gray-600);margin-bottom:16px">Draw your signature below. This will appear on the Staffing Plan for licensing reports.</p>
+    <canvas id="sigCanvas" class="sig-canvas" width="500" height="150"></canvas><br>
+    <div style="margin-top:12px;display:flex;gap:10px">
+      <button class="btn btn-primary" onclick="saveSig()">Save Signature</button>
+      <button class="btn btn-outline" onclick="clearSig()">Clear</button>
+    </div>
+    <div id="sigResult" style="margin-top:12px"></div>
+    <div id="currentSig" style="margin-top:20px"></div>
+  </div></div>`;
+  
+  // Setup canvas
+  setTimeout(() => {
+    const canvas = document.getElementById('sigCanvas');
+    const ctx = canvas.getContext('2d');
+    let drawing = false;
+    
+    ctx.strokeStyle = '#1B2A4A';
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    
+    canvas.addEventListener('mousedown', e => { drawing = true; ctx.beginPath(); ctx.moveTo(e.offsetX, e.offsetY); });
+    canvas.addEventListener('mousemove', e => { if (drawing) { ctx.lineTo(e.offsetX, e.offsetY); ctx.stroke(); } });
+    canvas.addEventListener('mouseup', () => drawing = false);
+    canvas.addEventListener('mouseleave', () => drawing = false);
+    
+    // Touch support
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing = true; const r = canvas.getBoundingClientRect(); ctx.beginPath(); ctx.moveTo(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top); });
+    canvas.addEventListener('touchmove', e => { e.preventDefault(); if (drawing) { const r = canvas.getBoundingClientRect(); ctx.lineTo(e.touches[0].clientX - r.left, e.touches[0].clientY - r.top); ctx.stroke(); } });
+    canvas.addEventListener('touchend', () => drawing = false);
+    
+    // Load existing
+    api('/api/settings/signature').then(sig => {
+      if (sig?.value) {
+        document.getElementById('currentSig').innerHTML = `<h4 style="font-size:13px;color:var(--gray-600);margin-bottom:8px">Current Saved Signature</h4><img src="${sig.value}" style="border:1px solid var(--gray-200);border-radius:8px;padding:10px;max-height:80px">
+          <div style="font-size:11px;color:var(--gray-400);margin-top:4px">Saved: ${new Date(sig.updated_at).toLocaleString()}</div>`;
+      }
+    });
+  }, 50);
+}
+
+function clearSig() {
+  const canvas = document.getElementById('sigCanvas');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+async function saveSig() {
+  const canvas = document.getElementById('sigCanvas');
+  const data = canvas.toDataURL('image/png');
+  try {
+    await api('/api/settings/signature', { method: 'POST', body: { signature_data: data } });
+    document.getElementById('sigResult').innerHTML = '<span style="color:var(--success)">✅ Signature saved!</span>';
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// ========================
+// SIDEBAR TOGGLE
+// ========================
+function toggleSidebar() {
+  const sb = document.getElementById('sidebarEl');
+  const ov = document.getElementById('sidebarOverlay');
+  if (sb.classList.contains('open')) {
+    closeSidebar();
+  } else {
+    sb.classList.add('open');
+    ov.classList.add('active');
+  }
+}
+
+function closeSidebar() {
+  const sb = document.getElementById('sidebarEl');
+  const ov = document.getElementById('sidebarOverlay');
+  sb.classList.remove('open');
+  ov.classList.remove('active');
+}
+
+// Auto-close sidebar when navigating on tablet/mobile
+const _origNavigate = navigate;
+
+// ========================
+// MODAL
+// ========================
+function closeModal() {
+  document.getElementById('modalOverlay').classList.remove('active');
+}
+
+document.getElementById('modalOverlay').addEventListener('click', function(e) {
+  if (e.target === this) closeModal();
 });
 
 // ========================
 // PAYROLL REPORT ARCHIVES
 // ========================
-app.get('/api/payroll-archives', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const result = await pool.query(
-      `SELECT id, period_start, period_end, pay_date, period_label, generated_by, notes, created_at,
-       (pdf_data IS NOT NULL) as has_pdf
-       FROM payroll_report_archives ORDER BY period_start DESC`
-    );
-    res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
 
-app.get('/api/payroll-archives/:id', requireRole('owner', 'payroll'), async (req, res) => {
+async function savePayrollArchive() {
+  const data = window._lastPayrollReportData;
+  if (!data) { alert('Generate a payroll report first.'); return; }
   try {
-    const result = await pool.query(
-      'SELECT id, period_start, period_end, pay_date, period_label, report_data, generated_by, notes, created_at, (pdf_data IS NOT NULL) as has_pdf FROM payroll_report_archives WHERE id = $1',
-      [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+    await api('/api/payroll-archives', { method: 'POST', body: {
+      period_start: data.payPeriod.start,
+      period_end: data.payPeriod.end,
+      pay_date: data.payPeriod.payDate,
+      period_label: data.payPeriod.label,
+      report_data: data,
+      notes: null
+    }});
+    alert('Payroll report archived for ' + data.payPeriod.label + '. You can view it anytime from Payroll Archives.');
+  } catch(e) { alert('Error saving archive: ' + e.message); }
+}
 
-app.get('/api/payroll-archives/:id/pdf', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const result = await pool.query('SELECT pdf_data, period_label, period_start, period_end FROM payroll_report_archives WHERE id = $1', [req.params.id]);
-    if (result.rows.length === 0) return res.status(404).json({ error: 'Not found' });
-    if (!result.rows[0].pdf_data) return res.status(404).json({ error: 'No PDF stored for this archive' });
-    const row = result.rows[0];
-    const filename = `TCC-Payroll-${row.period_start}-to-${row.period_end}.pdf`;
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.send(row.pdf_data);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+async function renderPayrollArchives() {
+  const el = document.getElementById('pageContent');
+  let archives = [];
+  try { archives = await api('/api/payroll-archives'); } catch(e) {}
 
-app.post('/api/payroll-archives', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const { period_start, period_end, pay_date, period_label, report_data, notes } = req.body;
-    const user = req.session.user;
-    const result = await pool.query(
-      `INSERT INTO payroll_report_archives (period_start, period_end, pay_date, period_label, report_data, generated_by, generated_by_user_id, notes)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-       ON CONFLICT (period_start, period_end) DO UPDATE SET report_data = $5, generated_by = $6, generated_by_user_id = $7, notes = $8, pay_date = $3, period_label = $4, created_at = NOW()
-       RETURNING *`,
-      [period_start, period_end, pay_date, period_label, JSON.stringify(report_data), user.full_name, user.id, notes || null]
-    );
-    res.json(result.rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
+  let html = `<div class="card"><div class="card-header"><h3>Payroll Report Archives (${archives.length})</h3>
+    <div style="font-size:12px;color:var(--gray-400)">Frozen snapshots of payroll reports</div></div><div class="card-body">`;
 
-app.delete('/api/payroll-archives/:id', requireRole('owner'), async (req, res) => {
-  try {
-    await pool.query('DELETE FROM payroll_report_archives WHERE id = $1', [req.params.id]);
-    res.json({ ok: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ========================
-// PAY PERIODS LIST & SMART DEFAULT
-// ========================
-app.get('/api/pay-periods/list', requireAuth, async (req, res) => {
-  try {
-    const current = getPayPeriod(new Date());
-    const periods = [];
-    for (let i = -12; i <= 4; i++) {
-      const d = new Date(); d.setDate(d.getDate() + (i * 15));
-      const pp = getPayPeriod(d);
-      if (!periods.find(p => p.start === pp.start)) { pp.isCurrent = pp.start === current.start; periods.push(pp); }
-    }
-    periods.sort((a, b) => a.start.localeCompare(b.start));
-    res.json(periods);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-app.get('/api/pay-period/smart-default', requireAuth, async (req, res) => {
-  try {
-    const user = req.session.user;
-    const currentPP = getPayPeriod(new Date());
-    if (user.role === 'payroll') {
-      const status = await pool.query(`SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND payroll_closed = TRUE LIMIT 1`, [currentPP.start, currentPP.end]);
-      if (status.rows.length > 0) {
-        const nextDate = new Date(currentPP.end + 'T12:00:00'); nextDate.setDate(nextDate.getDate() + 1);
-        res.json(getPayPeriod(nextDate));
-      } else {
-        const prevDate = new Date(currentPP.start + 'T12:00:00'); prevDate.setDate(prevDate.getDate() - 1);
-        res.json(getPayPeriod(prevDate));
-      }
-    } else if (user.role === 'director') {
-      const status = await pool.query(`SELECT * FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3 AND director_closed = TRUE`, [currentPP.start, currentPP.end, user.center]);
-      if (status.rows.length > 0) {
-        const nextDate = new Date(currentPP.end + 'T12:00:00'); nextDate.setDate(nextDate.getDate() + 1);
-        res.json(getPayPeriod(nextDate));
-      } else { res.json(currentPP); }
-    } else { res.json(currentPP); }
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ─── STATIC + CATCH-ALL ────────────────
-app.get('/', (req, res) => {
-  const hubToken = req.query.hub_token;
-  if (hubToken) {
-    const indexPath = path.join(__dirname, 'public', 'index.html');
-    let html = fs.readFileSync(indexPath, 'utf-8');
-    const patchScript = `<script>
-(function(){
-  var HUB_TOKEN = ${JSON.stringify(hubToken)};
-  var originalFetch = window.fetch;
-  window.fetch = function(url, opts) {
-    opts = opts || {};
-    if (typeof url === 'string' && url.startsWith('/api/')) {
-      opts.headers = opts.headers || {};
-      if (opts.headers instanceof Headers) { opts.headers.set('Authorization', 'Bearer ' + HUB_TOKEN); }
-      else { opts.headers['Authorization'] = 'Bearer ' + HUB_TOKEN; }
-    }
-    return originalFetch.call(this, url, opts);
-  };
-  window._hubSSO = true;
-})();
-</script>`;
-    html = html.replace('</head>', patchScript + '</head>');
-    return res.send(html);
+  if (archives.length === 0) {
+    html += `<div class="empty-state"><div class="icon">🗂️</div><p>No archived reports yet. Generate a payroll report and click "Save to Archive" to create one.</p></div>`;
+  } else {
+    html += `<table class="data-table"><thead><tr><th>Pay Period</th><th>Pay Date</th><th>Archived By</th><th>Archived On</th><th>Actions</th></tr></thead><tbody>`;
+    archives.forEach(a => {
+      const payDate = a.pay_date ? new Date(a.pay_date + 'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—';
+      const archivedOn = new Date(a.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'});
+      html += `<tr>
+        <td><strong>${a.period_label || a.period_start + ' - ' + a.period_end}</strong></td>
+        <td>${payDate}</td>
+        <td>${a.generated_by || '—'}</td>
+        <td style="font-size:12px">${archivedOn}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-primary btn-sm" onclick="viewArchivedReport(${a.id})">View Report</button>
+          ${currentUser.role === 'owner' ? `<button class="btn btn-outline btn-sm" onclick="deleteArchive(${a.id})" style="color:var(--danger)">✕</button>` : ''}
+        </td></tr>`;
+    });
+    html += `</tbody></table>`;
   }
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
-});
-app.use(express.static(path.join(__dirname, 'public')));
-app.get('{*path}', (req, res) => { res.sendFile(path.join(__dirname, 'public', 'index.html')); });
+  html += `</div></div>`;
+  el.innerHTML = html;
+}
 
-// Start
-initDB().then(() => {
-  app.listen(PORT, () => console.log(`TCC Payroll Hub running on port ${PORT}`));
-}).catch(err => { console.error('DB init error:', err); process.exit(1); });
+async function deleteArchive(id) {
+  if (!confirm('Delete this archived report? This cannot be undone.')) return;
+  try {
+    await api(`/api/payroll-archives/${id}`, { method: 'DELETE' });
+    renderPayrollArchives();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+async function viewArchivedReport(id) {
+  try {
+    const archive = await api(`/api/payroll-archives/${id}`);
+    const data = archive.report_data;
+    if (!data || !data.report) { alert('Archive data is empty or corrupted.'); return; }
+
+    let html = `<div class="modal-header"><h3>Archived Report — ${archive.period_label || ''}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>`;
+    html += `<div class="modal-body">`;
+    html += `<div style="background:var(--gold-pale);padding:10px 14px;border-radius:8px;margin-bottom:16px;font-size:12px">
+      <strong>Archived snapshot</strong> — saved by ${archive.generated_by || 'unknown'} on ${new Date(archive.created_at).toLocaleString()}.
+      This shows the report exactly as it was at the time of archiving.</div>`;
+
+    const byCenter = {};
+    data.report.forEach(r => {
+      if (!byCenter[r.center]) byCenter[r.center] = [];
+      byCenter[r.center].push(r);
+    });
+
+    for (const [ctr, emps] of Object.entries(byCenter)) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--navy);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid var(--gold-pale)">${ctr}</h4>`;
+      html += `<div class="table-scroll"><table class="data-table"><thead><tr><th>Name</th><th>Reg Hrs</th><th>OT Hrs</th><th>Total Hrs</th><th>PTO Days</th></tr></thead><tbody>`;
+      let ctrReg = 0, ctrOT = 0, ctrTotal = 0;
+      emps.sort((a,b) => a.last_name.localeCompare(b.last_name));
+      emps.forEach(e => {
+        ctrReg += e.regularHours; ctrOT += e.overtimeHours; ctrTotal += e.totalHours;
+        html += `<tr>
+          <td><strong>${e.last_name}, ${e.first_name}</strong></td>
+          <td style="font-family:'JetBrains Mono',monospace">${e.regularHours.toFixed(2)}</td>
+          <td style="font-family:'JetBrains Mono',monospace;${e.overtimeHours > 0 ? 'color:var(--danger);font-weight:700' : ''}">${e.overtimeHours > 0 ? e.overtimeHours.toFixed(2) : '—'}</td>
+          <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${e.totalHours.toFixed(2)}</td>
+          <td>${e.ptoDays > 0 ? e.ptoDays + 'd' : '—'}</td></tr>`;
+      });
+      html += `<tr style="background:var(--navy);color:white;font-weight:700">
+        <td>TOTAL — ${ctr}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrReg.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrOT.toFixed(2)}</td>
+        <td style="font-family:'JetBrains Mono',monospace">${ctrTotal.toFixed(2)}</td><td></td></tr>`;
+      html += `</tbody></table></div>`;
+    }
+
+    if (data.terminations && data.terminations.length > 0) {
+      html += `<h4 style="font-size:14px;font-weight:700;color:var(--danger);margin:16px 0 8px;padding-bottom:6px;border-bottom:2px solid #F09595">Terminations</h4>`;
+      html += `<table class="data-table"><thead><tr><th>Name</th><th>Center</th><th>Last Day</th><th>Reason</th></tr></thead><tbody>`;
+      data.terminations.forEach(t => {
+        html += `<tr><td><strong>${t.last_name}, ${t.first_name}</strong></td><td>${t.center}</td>
+          <td>${t.terminated_date ? new Date(t.terminated_date).toLocaleDateString() : '—'}</td>
+          <td style="font-size:11px">${t.termination_reason || '—'}</td></tr>`;
+      });
+      html += `</tbody></table>`;
+    }
+
+    html += `</div>`;
+    document.getElementById('modalContent').innerHTML = html;
+    document.getElementById('modalOverlay').classList.add('active');
+  } catch(e) { alert('Error loading archive: ' + e.message); }
+}
+
+// ========================
+// OVERTIME VIEW (all employees)
+// ========================
+async function renderOvertimeView() {
+  const el = document.getElementById('pageContent');
+  el.innerHTML = `<div style="text-align:center;padding:40px"><em style="color:var(--gray-400)">Loading overtime data...</em></div>`;
+
+  try {
+    const pp = payPeriod;
+    const centerParam = otViewCenter !== 'all' ? `&center=${encodeURIComponent(otViewCenter)}` : '';
+    const data = await api(`/api/overtime-view?date=${pp.start}${centerParam}`);
+
+    let html = '';
+
+    // Pay period navigation
+    html += `<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:20px">
+      <button class="btn btn-outline btn-sm" onclick="navOTView(-1)">◀ Previous Period</button>
+      <div style="text-align:center">
+        <div style="font-size:16px;font-weight:700;color:var(--navy)">${data.payPeriod.label}</div>
+        <div style="font-size:12px;color:var(--gray-400)">Overtime View · Mon–Sun weeks</div>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="navOTView(1)">Next Period ▶</button>
+    </div>`;
+
+    // Center filter tabs
+    html += `<div class="center-tabs">
+      <div class="center-tab ${otViewCenter === 'all' ? 'active' : ''}" onclick="otViewCenter='all';renderOvertimeView()">All Centers</div>`;
+    CENTERS.forEach(c => {
+      html += `<div class="center-tab ${otViewCenter === c ? 'active' : ''}" onclick="otViewCenter='${c}';renderOvertimeView()">${c}</div>`;
+    });
+    html += `</div>`;
+
+    // Toggle: show all vs OT only
+    const otEmployees = data.employees.filter(e => e.hasOT);
+    const withHours = data.employees.filter(e => e.hasHours);
+    const displayEmployees = otViewShowAll ? withHours : otEmployees;
+
+    html += `<div style="display:flex;align-items:center;gap:16px;margin-bottom:16px">
+      <button class="btn ${otViewShowAll ? 'btn-outline' : 'btn-primary'} btn-sm" onclick="otViewShowAll=false;renderOvertimeView()">⚠️ OT Only (${otEmployees.length})</button>
+      <button class="btn ${otViewShowAll ? 'btn-primary' : 'btn-outline'} btn-sm" onclick="otViewShowAll=true;renderOvertimeView()">👥 All Staff with Hours (${withHours.length})</button>
+    </div>`;
+
+    if (displayEmployees.length === 0) {
+      html += `<div class="empty-state"><div class="icon">⏱️</div><p>${otViewShowAll ? 'No hours recorded for this period yet.' : 'No overtime detected this period.'}</p></div>`;
+    } else {
+      const weeks = displayEmployees[0].weeks;
+
+      html += `<div class="card"><div class="card-body"><div class="table-scroll">
+        <table class="data-table" style="font-size:11px"><thead><tr>
+        <th style="min-width:160px;position:sticky;left:0;background:var(--gray-50);z-index:2">Employee</th>
+        <th>Center</th>`;
+
+      weeks.forEach((w, wi) => {
+        w.days.forEach(d => {
+          const inPP = d.date >= data.payPeriod.start && d.date <= data.payPeriod.end;
+          html += `<th style="text-align:center;min-width:40px;font-size:9px;${!inPP ? 'background:var(--gray-200);color:var(--gray-400)' : ''}">${d.dayName.charAt(0)}<br>${new Date(d.date + 'T12:00:00').getDate()}</th>`;
+        });
+        html += `<th style="text-align:center;min-width:50px;background:var(--navy);color:white;font-size:10px">Wk${wi+1}</th>`;
+      });
+
+      html += `<th style="text-align:center;min-width:55px;background:var(--gold);color:white">Period</th>
+        <th style="text-align:center;min-width:50px;background:var(--danger);color:white">OT</th></tr></thead><tbody>`;
+
+      let currentCtr = '';
+      const sorted = [...displayEmployees].sort((a,b) => {
+        if (a.center !== b.center) return a.center.localeCompare(b.center);
+        return a.last_name.localeCompare(b.last_name);
+      });
+
+      sorted.forEach(emp => {
+        if (otViewCenter === 'all' && emp.center !== currentCtr) {
+          currentCtr = emp.center;
+          const colSpan = 3 + weeks.reduce((sum, w) => sum + w.days.length + 1, 0) + 2;
+          html += `<tr style="background:var(--navy);color:white"><td colspan="${colSpan}" style="padding:6px 14px;font-weight:700">${currentCtr}</td></tr>`;
+        }
+
+        const hasOT = emp.hasOT;
+        html += `<tr style="${hasOT ? 'background:var(--danger-bg)' : ''}">
+          <td style="position:sticky;left:0;background:${hasOT ? 'var(--danger-bg)' : 'white'};z-index:1;font-weight:600">${emp.last_name}, ${emp.first_name}</td>
+          <td style="font-size:10px">${emp.center}</td>`;
+
+        emp.weeks.forEach(w => {
+          w.days.forEach(d => {
+            const inPP = d.inPayPeriod;
+            const h = d.hours;
+            const cellStyle = `text-align:center;font-family:'JetBrains Mono',monospace;font-size:10px;${!inPP ? 'background:var(--gray-100);color:var(--gray-400);' : ''}${h > 10 ? 'color:var(--danger);font-weight:700;' : ''}`;
+            html += `<td style="${cellStyle}">${h > 0 ? h.toFixed(1) : '<span style="color:var(--gray-200)">—</span>'}</td>`;
+          });
+          const wkStyle = w.overtimeHours > 0 ? 'color:var(--danger);font-weight:700' : 'font-weight:600';
+          html += `<td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;background:rgba(27,42,74,0.04);${wkStyle}">${w.weekTotal.toFixed(1)}</td>`;
+        });
+
+        html += `<td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;background:var(--gold-pale)">${emp.inPeriodHours.toFixed(1)}</td>`;
+        html += `<td style="text-align:center;font-family:'JetBrains Mono',monospace;font-size:11px;font-weight:700;${emp.totalOT > 0 ? 'color:var(--danger);background:rgba(192,57,43,0.08)' : 'color:var(--gray-300)'}">${emp.totalOT > 0 ? '⚠️ ' + emp.totalOT.toFixed(1) : '—'}</td>`;
+        html += `</tr>`;
+      });
+
+      html += `</tbody></table></div></div></div>`;
+    }
+
+    html += `<div style="background:var(--gold-pale);border-radius:8px;padding:12px 16px;margin-top:16px;font-size:12px;color:var(--gray-600);line-height:1.6">
+      <strong>How overtime is calculated:</strong> Michigan law uses Mon–Sun work weeks. When a pay period starts or ends mid-week,
+      the full week is shown (grayed-out days are from the adjacent pay period). Any week where total hours exceed 40 triggers overtime.
+      The <strong>OT</strong> column shows total overtime hours across all weeks for each employee.</div>`;
+
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = `<div style="color:var(--danger);padding:20px">Error loading overtime view: ${e.message}</div>`;
+  }
+}
+
+function navOTView(dir) {
+  const d = new Date(payPeriod.start + 'T12:00:00');
+  d.setDate(d.getDate() + (dir * 16));
+  api(`/api/pay-period?date=${d.toISOString().split('T')[0]}`).then(pp => {
+    payPeriod = pp;
+    document.getElementById('payPeriodLabel').textContent = pp.label + ' · Pay Date: ' + new Date(pp.payDate + 'T12:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    renderOvertimeView();
+  });
+}  
+// ========================
+// INIT
+// ========================
+document.getElementById('loginPass').addEventListener('keypress', e => { if (e.key === 'Enter') doLogin(); });
+
+// Check session on load
+api('/api/me').then(data => {
+  currentUser = data.user;
+  showApp();
+}).catch(() => showLogin());
+</script>
+</body>
+</html>
