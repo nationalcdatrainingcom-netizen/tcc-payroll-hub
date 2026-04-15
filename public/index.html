@@ -3176,8 +3176,10 @@ async function renderStaffingPlan() {
   const seen = new Set();
   const centerData = spData.filter(s => {
     if (s.center !== center) return false;
-    if (seen.has(s.employee_id)) return false;
-    seen.add(s.employee_id);
+    // External entries (employee_id=NULL) use sp id as key so multiples are allowed
+    const key = s.employee_id ? `emp-${s.employee_id}-${s.entry_type || 'staff'}` : `ext-${s.id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
   
@@ -3271,6 +3273,7 @@ async function renderStaffingPlan() {
     const isSubs = classroom === 'Subs from other centers';
     const isTherapists = classroom === 'Therapist / Unsupervised Volunteers';
     const isVolunteers = classroom === 'Supervised Volunteers';
+    const isAdmin = classroom === 'Admin / Office / Food Prep';
     
     html += `<tr style="background:var(--navy);color:white">
       <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">
@@ -3282,6 +3285,9 @@ async function renderStaffingPlan() {
     }
     if (canManageSubs && (isTherapists || isVolunteers)) {
       html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showAddExternalModal('${center.replace(/'/g,"\\'")}','${classroom.replace(/'/g,"\\'")}')">+ Add ${isTherapists ? 'Therapist/Volunteer' : 'Volunteer'}</button>`;
+    }
+    if (canEdit && isAdmin) {
+      html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showAddStaffToSection('${center.replace(/'/g,"\\'")}','Admin / Office / Food Prep')">+ Add Staff</button>`;
     }
     html += `</span></div></td></tr>`;
     
@@ -3511,6 +3517,48 @@ async function saveStaffingEntry(center) {
   try {
     await api('/api/staffing-plan', { method: 'POST', body: {
       employee_id: parseInt(empId), center, classroom, role_in_room: role,
+      orientation_date:null, cpr_first_aid_date:null, health_safety_abc_date:null, health_safety_refresher:null,
+      ccbc_consent_date:null, fingerprinting_date:null, date_eligible:null, abuse_neglect_statement:null,
+      last_evaluation:null, date_promoted_lead:null, date_assigned_room:null, education:null, semester_hours:null, infant_toddler_training:null
+    }});
+    closeModal();
+    renderStaffingPlan();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
+// Add staff directly to a specific section (Admin/Office/Food Prep)
+function showAddStaffToSection(center, sectionName) {
+  const roles = sectionName === 'Admin / Office / Food Prep'
+    ? ['Director','Asst. Director','Office','Food Prep','Custodian','Other']
+    : ['Lead','Co-Lead','Assistant','Caregiver','Floater','Sub','Director','Asst. Director','Office','Food Prep'];
+  
+  let html = `<div class="modal-header"><h3>Add Staff to ${sectionName}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
+    <div class="modal-body">
+      <div class="form-row">
+        <div class="form-group"><label>Employee</label><select id="secEmployee">
+          <option value="">Select employee...</option>
+          ${employees.map(e => '<option value="' + e.id + '">' + e.last_name + ', ' + e.first_name + ' (' + e.center + ')</option>').join('')}
+        </select></div>
+        <div class="form-group"><label>Role</label><select id="secRole">
+          ${roles.map(r => '<option>' + r + '</option>').join('')}
+        </select></div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="doAddStaffToSection('${center.replace(/'/g,"\\'")}','${sectionName.replace(/'/g,"\\'")}')">Add to ${sectionName}</button>
+    </div>`;
+  document.getElementById('modalContent').innerHTML = html;
+  document.getElementById('modalOverlay').classList.add('active');
+}
+
+async function doAddStaffToSection(center, sectionName) {
+  const empId = document.getElementById('secEmployee').value;
+  if (!empId) return alert('Please select an employee.');
+  const role = document.getElementById('secRole').value;
+  try {
+    await api('/api/staffing-plan', { method: 'POST', body: {
+      employee_id: parseInt(empId), center, classroom: sectionName, role_in_room: role,
       orientation_date:null, cpr_first_aid_date:null, health_safety_abc_date:null, health_safety_refresher:null,
       ccbc_consent_date:null, fingerprinting_date:null, date_eligible:null, abuse_neglect_statement:null,
       last_evaluation:null, date_promoted_lead:null, date_assigned_room:null, education:null, semester_hours:null, infant_toddler_training:null
