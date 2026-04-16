@@ -779,9 +779,9 @@ async function loadPTOSummary() {
   try {
     let filtered = employees;
     if (currentUser.role === 'director') {
-      filtered = employees.filter(e => e.center === currentUser.center);
+      filtered = employees.filter(e => (e.payroll_center || e.center) === currentUser.center);
     } else if (dashboardCenter !== 'all') {
-      filtered = employees.filter(e => e.center === dashboardCenter);
+      filtered = employees.filter(e => (e.payroll_center || e.center) === dashboardCenter);
     }
     
     area.innerHTML = `<em style="color:var(--gray-400)">Loading PTO data for ${filtered.length} employees...</em>`;
@@ -804,6 +804,7 @@ async function loadPTOSummary() {
         <strong>How PTO is calculated:</strong> Every employee earns <strong>1 hour of PTO for every 20 hours worked</strong> (max 80 hours/year). 
         Full-time staff (35+ hrs/wk) also receive <strong>tenure bonus days</strong> per the policy chart (1-4 extra days for years 1-4, jumps to 11+ at year 5). 
         Hours worked updates each time a Playground timecard CSV is uploaded. <strong>PTO balances update once payroll has been closed out each pay period.</strong>
+        Paid days from <strong>Jan 1-8</strong> (paid out on a pay period that started in 2025) are added automatically since they aren't captured by the QuickBooks payroll import — these show with a small <span style="color:var(--info);font-weight:600">+Xd*</span> indicator next to the Used column.
       </div>
       <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>${details.length}</strong> employees</div>
       <table class="data-table"><thead><tr>
@@ -854,14 +855,14 @@ function buildPTORow(e) {
   const hasCarryover = (p.carryoverHours || 0) > 0;
   return `<tr class="clickable" onclick="showEmployeeDetail(${e.id})">
     <td><strong>${e.last_name}, ${e.first_name}</strong></td>
-    <td>${e.center}</td>
+    <td>${e.payroll_center && e.payroll_center !== e.center ? e.payroll_center + ' <span style="font-size:9px;color:var(--gray-400)" title="Staffed at ' + e.center + '">(@' + e.center + ')</span>' : e.center}</td>
     <td>${p.yearsEmployed || 0}</td>
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.totalHoursWorked||0).toFixed(1)}</td>
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.accruedHours||0).toFixed(1)+'h'}</td>
     <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px;${hasCarryover?'color:var(--info);font-weight:600':''}">${hasCarryover ? (p.carryoverHours).toFixed(1)+'h' : '0h'}</td>
     <td style="font-weight:600">${noHoursData ? '<span style="color:var(--gray-300)">pending</span>' : (p.totalAvailableHours||0).toFixed(1)+'h'}</td>
-    <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)</td>
+    <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)${p.crossoverDaysUsed > 0 ? ' <span style="font-size:9px;color:var(--info);font-weight:600" title="Includes ' + p.crossoverDaysUsed + ' day(s) from Jan 1-8 not yet captured by QuickBooks payroll import">+' + p.crossoverDaysUsed + 'd*</span>' : ''}</td>
     <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.remainingHours||0).toFixed(1)+'h'}</td>
     <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months}</span>` : (p.unpaidLast6Months||0)}</td>
   </tr>`;
@@ -963,8 +964,8 @@ async function renderEmployees() {
   }
   
   const filtered = employees.filter(e => {
-    if (currentUser.role === 'director') return e.center === currentUser.center;
-    if (selectedCenter !== 'all') return e.center === selectedCenter;
+    if (currentUser.role === 'director') return (e.payroll_center || e.center) === currentUser.center;
+    if (selectedCenter !== 'all') return (e.payroll_center || e.center) === selectedCenter;
     return true;
   });
   
@@ -980,7 +981,7 @@ async function renderEmployees() {
     const yrs = new Date().getFullYear() - e.year_hired;
     html += `<tr class="clickable">
       <td onclick="showEmployeeDetail(${e.id})"><strong>${e.last_name}, ${e.first_name}</strong></td>
-      <td>${e.center}</td>
+      <td>${e.payroll_center && e.payroll_center !== e.center ? e.payroll_center + ' <span style="font-size:9px;color:var(--gray-400)" title="Staffing plan: ' + e.center + '">(@' + e.center + ')</span>' : e.center}</td>
       <td style="font-size:11px">${e.classroom || '—'}</td>
       <td>${e.position || '—'}</td>
       <td>${e.year_hired}</td>
@@ -1264,7 +1265,8 @@ async function showEmployeeDetail(id) {
       Hours worked YTD: <strong>${emp.pto.totalHoursWorked}</strong> ÷ 20 = <strong>${emp.pto.accruedHours} hrs</strong> accrued (cap: 80 hrs)<br>
       ${emp.pto.tenureBonusDays > 0 ? `Tenure bonus (${emp.pto.yearsEmployed} yrs): <strong>${emp.pto.tenureBonusDays} days</strong> (${emp.pto.tenureBonusHours} hrs at ${emp.pto.hoursPerDay}h/day)<br>` : ''}
       ${emp.pto.carryoverHours > 0 ? `2025 carryover: <strong>${emp.pto.carryoverHours} hrs</strong><br>` : ''}
-      Total available: <strong>${emp.pto.totalAvailableHours} hrs</strong> (${emp.pto.totalAvailableDays} days)
+      Total available: <strong>${emp.pto.totalAvailableHours} hrs</strong> (${emp.pto.totalAvailableDays} days)<br>
+      ${emp.pto.crossoverHoursUsed > 0 || emp.pto.qbHoursUsed > 0 ? `<br><strong>Hours Used breakdown:</strong> QuickBooks-verified: <strong>${(emp.pto.qbHoursUsed||0).toFixed(1)} hrs</strong>${emp.pto.crossoverHoursUsed > 0 ? ' + Jan 1-8 (pre-payroll-import): <strong>' + emp.pto.crossoverHoursUsed.toFixed(1) + ' hrs (' + emp.pto.crossoverDaysUsed + ' days)</strong>' : ''} = <strong>${emp.pto.hoursUsed} hrs total</strong>` : ''}
     </div>
     
     ${emp.pto.unpaidWarning ? `<div style="background:var(--danger-bg);padding:8px 12px;border-radius:6px;font-size:12px;color:var(--danger);font-weight:600;margin-bottom:12px">⚠️ ${emp.pto.unpaidLast6Months} unpaid days in last 6 months — exceeds 5 day limit</div>` : 
@@ -1478,7 +1480,7 @@ async function renderTimeOff() {
   const el = document.getElementById('pageContent');
   const isDirector = currentUser.role === 'director';
   const isPayroll = ['owner','payroll'].includes(currentUser.role);
-  const filtered = isDirector ? employees.filter(e => e.center === currentUser.center) : employees;
+  const filtered = isDirector ? employees.filter(e => (e.payroll_center || e.center) === currentUser.center) : employees;
   const center = isDirector ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
   
   // Get dates in current pay period
@@ -1533,7 +1535,19 @@ async function renderTimeOff() {
       <div>
       ${isDirector && !isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="unsubmitTimeOff()">Unsubmit</button>` : ''}
       ${isDirector && isLockedByJared ? `<button class="btn btn-outline btn-sm" onclick="requestTimeOffChange()" style="color:var(--warning)">Request Change</button>` : ''}
+      ${isPayroll ? `<button class="btn btn-outline btn-sm" onclick="forceUnlockTimeOff()" style="color:var(--danger);border-color:var(--danger)">🔓 Force Unlock</button>` : ''}
       </div>
+    </div>`;
+  }
+  
+  // Force-unlock banner: shown to owner/payroll even when not submitted, if any signoff fields are set incorrectly
+  if (isPayroll && !isSubmitted && (ppStatus.timeoff_approved || ppStatus.timeoff_signed_by || ppStatus.payroll_accessed_at)) {
+    html += `<div style="background:var(--warning-bg);border:1px solid var(--warning);border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between">
+      <div>
+        <span style="font-size:14px;font-weight:700;color:var(--warning)">⚠️ Stale Signoff Data Detected</span>
+        <span style="font-size:12px;color:var(--gray-600);margin-left:12px">This period has signoff timestamps but is not properly submitted. Force unlock to clear.</span>
+      </div>
+      <button class="btn btn-outline btn-sm" onclick="forceUnlockTimeOff()" style="color:var(--danger);border-color:var(--danger)">🔓 Force Unlock</button>
     </div>`;
   }
   
@@ -1566,7 +1580,7 @@ async function renderTimeOff() {
   });
   html += `</tr></thead><tbody>`;
   
-  const centerFiltered = isDirector ? filtered.filter(e => !isAdminStaff(e)) : filtered.filter(e => e.center === center);
+  const centerFiltered = isDirector ? filtered.filter(e => !isAdminStaff(e)) : filtered.filter(e => (e.payroll_center || e.center) === center);
   
   centerFiltered.forEach(emp => {
     html += `<tr><td class="name-cell">${emp.last_name}, ${emp.first_name.charAt(0)}.</td>`;
@@ -1665,6 +1679,27 @@ async function unsubmitTimeOff() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+// Force unlock — owner/payroll only — clears ALL signoff fields including payroll_accessed_at
+// Use when a director accidentally signed off too early or in a wrong period
+async function forceUnlockTimeOff() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
+  if (!confirm(`Force unlock time off for ${center} (${pp.label || pp.start + ' to ' + pp.end})?\n\nThis will:\n• Clear the submission status\n• Clear all signoff signatures\n• Clear any payroll-accessed lock\n• Allow the director to re-edit and re-submit\n\nUse this only when something is stuck or was signed off in error.`)) return;
+  try {
+    const res = await fetch('/api/payroll-workflow/force-unlock-timeoff', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period_start: pp.start, period_end: pp.end, center })
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.message || data.error); return; }
+    alert(`Time off for ${center} has been unlocked. The director can now re-enter and submit.`);
+    if (currentUser.role === 'director') renderDirectorPayroll();
+    else if (typeof renderPayrollProcessing === 'function' && document.getElementById('view-payroll-processing')?.classList.contains('active')) renderPayrollProcessing();
+    else renderTimeOff();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 async function requestTimeOffChange() {
   const reason = prompt('Describe what needs to change and why:');
   if (!reason) return;
@@ -1754,7 +1789,7 @@ async function renderTimeOffCalendar() {
   const currentPP = payPeriod || {};
   const ppStartDate = currentPP.start ? new Date(currentPP.start + 'T12:00:00') : new Date();
   
-  const filtered = isDir ? employees.filter(e => e.center === currentUser.center) : employees;
+  const filtered = isDir ? employees.filter(e => (e.payroll_center || e.center) === currentUser.center) : employees;
   
   // Load entries
   const entries = {};
@@ -1824,7 +1859,7 @@ async function renderTimeOffCalendar() {
   }
   html += `</tr></thead><tbody>`;
   
-  const calFiltered = filtered.filter(e => selectedCenter === 'all' || e.center === selectedCenter);
+  const calFiltered = filtered.filter(e => selectedCenter === 'all' || (e.payroll_center || e.center) === selectedCenter);
   
   calFiltered.forEach(emp => {
     html += `<tr><td class="name-cell">${emp.last_name}</td><td class="name-cell">${emp.first_name}</td>`;
@@ -1959,8 +1994,8 @@ async function renderTimeOffYearly() {
   }
   
   let filtered = employees.filter(e => {
-    if (isDirector) return e.center === currentUser.center && !isAdminStaff(e);
-    if (selectedCenter !== 'all') return e.center === selectedCenter;
+    if (isDirector) return (e.payroll_center || e.center) === currentUser.center && !isAdminStaff(e);
+    if (selectedCenter !== 'all') return (e.payroll_center || e.center) === selectedCenter;
     return true;
   });
   
@@ -2044,7 +2079,7 @@ let dirPayrollPP = null;
 async function renderDirectorPayroll() {
   const el = document.getElementById('pageContent');
   const center = currentUser.center;
-  const filtered = employees.filter(e => e.center === center && !isAdminStaff(e));
+  const filtered = employees.filter(e => (e.payroll_center || e.center) === center && !isAdminStaff(e));
   
   // On first load, check if the previous pay period is incomplete — if so, start there
   if (!dirPayrollPP) {
@@ -2350,7 +2385,7 @@ async function dirUploadTimecard() {
     // Show daily hours summary grid
     const pp = dirPayrollPP || payPeriod;
     const center = currentUser.center;
-    const centerEmps = employees.filter(e => e.center === center && !isAdminStaff(e));
+    const centerEmps = employees.filter(e => (e.payroll_center || e.center) === center && !isAdminStaff(e));
     
     // Build date range for the pay period
     const startD = new Date(pp.start + 'T12:00:00');
@@ -2497,6 +2532,7 @@ async function renderPayroll() {
         <div style="font-size:20px">${pp.timeoff_approved||pp.timeoff_submitted?'✅':'2️⃣'}</div>
         <div style="font-size:11px;font-weight:700;margin-top:4px">Time Off</div>
         ${pp.timeoff_signed_by||pp.timeoff_submitted_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timeoff_signed_by||pp.timeoff_submitted_by}</div>` : ''}
+        ${isPayroll && (pp.timeoff_submitted || pp.timeoff_approved || pp.timeoff_signed_by || pp.payroll_accessed_at) ? `<button class="btn btn-outline btn-sm" onclick="forceUnlockTimeOff()" style="margin-top:6px;padding:2px 8px;font-size:10px;color:var(--danger);border-color:var(--danger)" title="Clear all signoff data and allow re-submission">🔓 Unlock</button>` : ''}
       </div>
       <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.payroll_closed?'var(--success-bg)':'var(--gray-100)'}">
         <div style="font-size:20px">${pp.payroll_closed?'✅':'3️⃣'}</div>
@@ -3157,20 +3193,30 @@ async function renderStaffingPlan() {
   if (selectedCenter === 'all' && currentUser.role !== 'director') selectedCenter = 'Peace Boulevard';
   
   // Signature display
+  // Load staffing plan data from DB
+  let spData = [];
+  try { spData = await api('/api/staffing-plan'); } catch(e) {}
+  
+  // Compute the most recent update date for this center's staffing plan
+  let mostRecentUpdate = null;
+  spData.forEach(s => {
+    if (s.center === center && s.updated_at) {
+      const d = new Date(s.updated_at);
+      if (!mostRecentUpdate || d > mostRecentUpdate) mostRecentUpdate = d;
+    }
+  });
+  
+  // Signature display + last updated
   try {
     const sig = await api('/api/settings/signature');
     if (sig && sig.value) {
       html += `<div style="display:flex;align-items:center;gap:16px;margin-bottom:20px;background:white;padding:12px 20px;border-radius:var(--radius);box-shadow:var(--shadow-sm)">
         <span style="font-size:12px;font-weight:600;color:var(--gray-600)">Licensee Signature:</span>
         <img src="${sig.value}" style="height:40px">
-        <span style="font-size:12px;color:var(--gray-400)">Date: ${new Date(sig.updated_at).toLocaleDateString()}</span>
+        <span style="font-size:12px;color:var(--gray-400)">Plan last updated: ${mostRecentUpdate ? mostRecentUpdate.toLocaleDateString() : 'never'}</span>
       </div>`;
     }
   } catch(e) {}
-  
-  // Load staffing plan data from DB
-  let spData = [];
-  try { spData = await api('/api/staffing-plan'); } catch(e) {}
   
   // Filter to this center and deduplicate
   const seen = new Set();
