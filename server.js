@@ -1253,14 +1253,17 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
     
     // Use center-specific template to determine which classrooms to show and their order
-    const peaceTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','Dinos (GSRP)','Penguins (GSRP)','School-Agers'];
-    const nilesTemplate = ['Infant Room','Young Toddler Room','Older Toddler Room','GSRP-1','GSRP-2','Strong Beginnings','School-Agers'];
-    const montessoriTemplate = ['GSRP Orange','GSRP Blue','GSRP Pink'];
+    // These MUST match the classroom names used in index.html (PEACE_CLASSROOMS, NILES_CLASSROOMS, MCC_CLASSROOMS)
+    const peaceTemplate = ['Infants - Caterpillars','Infants/Toddlers - Butterflies','Toddlers - Dolphins','Toddlers - Kangas','Toddlers - Lions','Montessori Infants','Twos - Bears','Twos/Threes - Tigers','GSRP - Penguins','GSRP - Dinos','Threes/Fours Flamingos'];
+    const nilesTemplate = ['Infants/Ones','Ones/Twos','Strong Beginnings - Threes','GSRP - 1 (4-Day)','GSRP - 2 (4-Day)','Toddler','Multi-Age - Miss Judy'];
+    const montessoriTemplate = ['Toddlers - Purple','Pre-Primary - Yellow','Primary - Red','GSRP - Orange','GSRP - Blue','GSRP - Pink'];
     const centerRooms = center === 'Niles' ? nilesTemplate : center === 'Montessori' ? montessoriTemplate : peaceTemplate;
     const bottomSections = ['Admin / Office / Food Prep', 'Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
     
-    // Only show template classrooms + bottom sections, in order
-    const orderedClassrooms = [...centerRooms, ...bottomSections].filter(c => classrooms[c] && classrooms[c].length > 0 || bottomSections.includes(c) || centerRooms.includes(c));
+    // Show ALL template classrooms (even empty) + any non-template classrooms that have actual staff
+    const templateSet = new Set([...centerRooms, ...bottomSections]);
+    const extraClassrooms = Object.keys(classrooms).filter(c => !templateSet.has(c));
+    const orderedClassrooms = [...centerRooms, ...bottomSections, ...extraClassrooms];
     
     // Compute most recent update date for this center's staffing plan
     let lastUpdated = null;
