@@ -804,7 +804,7 @@ async function loadPTOSummary() {
         <strong>How PTO is calculated:</strong> Every employee earns <strong>1 hour of PTO for every 20 hours worked</strong> (max 80 hours/year). 
         Full-time staff (35+ hrs/wk) also receive <strong>tenure bonus days</strong> per the policy chart (1-4 extra days for years 1-4, jumps to 11+ at year 5). 
         Hours worked updates each time a Playground timecard CSV is uploaded. <strong>PTO balances update once payroll has been closed out each pay period.</strong>
-        Paid days from <strong>Jan 1-8</strong> (paid out on a pay period that started in 2025) are added automatically since they aren't captured by the QuickBooks payroll import — these show with a small <span style="color:var(--info);font-weight:600">+Xd*</span> indicator next to the Used column.
+        ${currentUser.username === 'mary' || currentUser.username === 'jared' ? `Paid days from <strong>Jan 1-8</strong> (paid out on a pay period that started in 2025) are added automatically since they aren't captured by the QuickBooks payroll import — these show with a small <span style="color:var(--info);font-weight:600">+Xd*</span> indicator next to the Used column.` : ''}
       </div>
       <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px"><strong>${details.length}</strong> employees</div>
       <table class="data-table"><thead><tr>
@@ -862,7 +862,7 @@ function buildPTORow(e) {
     <td>${p.tenureBonusDays||0}d (${(p.tenureBonusHours||0).toFixed(0)}h)</td>
     <td style="font-family:'JetBrains Mono',monospace;font-size:11px;${hasCarryover?'color:var(--info);font-weight:600':''}">${hasCarryover ? (p.carryoverHours).toFixed(1)+'h' : '0h'}</td>
     <td style="font-weight:600">${noHoursData ? '<span style="color:var(--gray-300)">pending</span>' : (p.totalAvailableHours||0).toFixed(1)+'h'}</td>
-    <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)${p.crossoverDaysUsed > 0 ? ' <span style="font-size:9px;color:var(--info);font-weight:600" title="Includes ' + p.crossoverDaysUsed + ' day(s) from Jan 1-8 not yet captured by QuickBooks payroll import">+' + p.crossoverDaysUsed + 'd*</span>' : ''}</td>
+    <td>${p.daysUsed||0}d (${(p.hoursUsed||0).toFixed(0)}h)${p.crossoverDaysUsed > 0 && (currentUser.username === 'mary' || currentUser.username === 'jared') ? ' <span style="font-size:9px;color:var(--info);font-weight:600" title="Includes ' + p.crossoverDaysUsed + ' day(s) from Jan 1-8 not yet captured by QuickBooks payroll import">+' + p.crossoverDaysUsed + 'd*</span>' : ''}</td>
     <td style="font-weight:700;color:${warn?'var(--danger)':'var(--success)'}">${noHoursData ? '<span style="color:var(--gray-300)">—</span>' : (p.remainingHours||0).toFixed(1)+'h'}</td>
     <td>${unpaidWarn ? `<span class="badge badge-danger">${p.unpaidLast6Months}</span>` : (p.unpaidLast6Months||0)}</td>
   </tr>`;
@@ -1266,7 +1266,7 @@ async function showEmployeeDetail(id) {
       ${emp.pto.tenureBonusDays > 0 ? `Tenure bonus (${emp.pto.yearsEmployed} yrs): <strong>${emp.pto.tenureBonusDays} days</strong> (${emp.pto.tenureBonusHours} hrs at ${emp.pto.hoursPerDay}h/day)<br>` : ''}
       ${emp.pto.carryoverHours > 0 ? `2025 carryover: <strong>${emp.pto.carryoverHours} hrs</strong><br>` : ''}
       Total available: <strong>${emp.pto.totalAvailableHours} hrs</strong> (${emp.pto.totalAvailableDays} days)<br>
-      ${emp.pto.crossoverHoursUsed > 0 || emp.pto.qbHoursUsed > 0 ? `<br><strong>Hours Used breakdown:</strong> QuickBooks-verified: <strong>${(emp.pto.qbHoursUsed||0).toFixed(1)} hrs</strong>${emp.pto.crossoverHoursUsed > 0 ? ' + Jan 1-8 (pre-payroll-import): <strong>' + emp.pto.crossoverHoursUsed.toFixed(1) + ' hrs (' + emp.pto.crossoverDaysUsed + ' days)</strong>' : ''} = <strong>${emp.pto.hoursUsed} hrs total</strong>` : ''}
+      ${(currentUser.username === 'mary' || currentUser.username === 'jared') && (emp.pto.crossoverHoursUsed > 0 || emp.pto.qbHoursUsed > 0) ? `<br><strong>Hours Used breakdown:</strong> QuickBooks-verified: <strong>${(emp.pto.qbHoursUsed||0).toFixed(1)} hrs</strong>${emp.pto.crossoverHoursUsed > 0 ? ' + Jan 1-8 (pre-payroll-import): <strong>' + emp.pto.crossoverHoursUsed.toFixed(1) + ' hrs (' + emp.pto.crossoverDaysUsed + ' days)</strong>' : ''} = <strong>${emp.pto.hoursUsed} hrs total</strong>` : ''}
     </div>
     
     ${emp.pto.unpaidWarning ? `<div style="background:var(--danger-bg);padding:8px 12px;border-radius:6px;font-size:12px;color:var(--danger);font-weight:600;margin-bottom:12px">⚠️ ${emp.pto.unpaidLast6Months} unpaid days in last 6 months — exceeds 5 day limit</div>` : 
