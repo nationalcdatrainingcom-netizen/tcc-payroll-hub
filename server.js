@@ -659,10 +659,22 @@ app.post('/api/time-off', requireAuth, async (req, res) => {
     const { employee_id, entry_date, entry_type, notes } = req.body;
     const user = req.session.user;
     if (user.role === 'director') {
-      const currentPP = getPayPeriod(new Date());
-      const entryD = new Date(entry_date + 'T12:00:00');
-      const ppStart = new Date(currentPP.start + 'T12:00:00');
-      if (entryD < ppStart) return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods. Submit a change request.' });
+      // Check if the pay period containing this entry has been signed off and locked
+      const entryPP = getPayPeriod(new Date(entry_date + 'T12:00:00'));
+      const ppStatus = await pool.query(
+        `SELECT timeoff_submitted, payroll_closed, payroll_accessed_at FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+        [entryPP.start, entryPP.end, user.center]
+      );
+      if (ppStatus.rows.length > 0) {
+        const status = ppStatus.rows[0];
+        // Only block if payroll is fully closed, OR if it's been signed off AND payroll has been accessed (locked by Jared)
+        if (status.payroll_closed) {
+          return res.status(403).json({ error: 'past_period', message: 'This pay period has been closed by payroll. Submit a change request.' });
+        }
+        if (status.timeoff_submitted && status.payroll_accessed_at) {
+          return res.status(403).json({ error: 'locked', message: 'Payroll processing has begun for this period. Submit a change request.' });
+        }
+      }
     }
     const result = await pool.query(
       `INSERT INTO time_off_entries (employee_id, entry_date, entry_type, entered_by, notes) VALUES ($1, $2, $3, $4, $5)
@@ -678,10 +690,21 @@ app.delete('/api/time-off/:id', requireAuth, async (req, res) => {
     if (req.session.user.role === 'director') {
       const entry = await pool.query('SELECT entry_date FROM time_off_entries WHERE id = $1', [req.params.id]);
       if (entry.rows.length > 0) {
-        const currentPP = getPayPeriod(new Date());
-        const entryD = new Date(entry.rows[0].entry_date);
-        const ppStart = new Date(currentPP.start + 'T12:00:00');
-        if (entryD < ppStart) return res.status(403).json({ error: 'past_period', message: 'Cannot edit past pay periods.' });
+        const entryDate = entry.rows[0].entry_date;
+        const entryPP = getPayPeriod(new Date(entryDate));
+        const ppStatus = await pool.query(
+          `SELECT timeoff_submitted, payroll_closed, payroll_accessed_at FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+          [entryPP.start, entryPP.end, req.session.user.center]
+        );
+        if (ppStatus.rows.length > 0) {
+          const status = ppStatus.rows[0];
+          if (status.payroll_closed) {
+            return res.status(403).json({ error: 'past_period', message: 'This pay period has been closed by payroll.' });
+          }
+          if (status.timeoff_submitted && status.payroll_accessed_at) {
+            return res.status(403).json({ error: 'locked', message: 'Payroll processing has begun for this period.' });
+          }
+        }
       }
     }
     await pool.query('DELETE FROM time_off_entries WHERE id = $1', [req.params.id]);
