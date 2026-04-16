@@ -273,6 +273,10 @@ async function initDB() {
   await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS external_start_date DATE`);
   // entry_type: 'staff' (default), 'sub' (cross-center), 'external' (therapist/volunteer)
   await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS entry_type VARCHAR(20) DEFAULT 'staff'`);
+  // updated_at: tracks the last time any change was made to a staffing plan entry
+  await pool.query(`ALTER TABLE staffing_plan ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT NOW()`);
+  // Backfill: any rows where updated_at is NULL get set to created_at
+  await pool.query(`UPDATE staffing_plan SET updated_at = created_at WHERE updated_at IS NULL`);
 
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
@@ -355,7 +359,21 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const totalAvailableDays = totalAvailableHours / hoursPerDay;
   const qbUsed = parseFloat(carryoverHours === undefined ? 0 :
     (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
-  const hoursUsed = qbUsed;
+  
+  // Crossover-period PTO: P-marked time_off_entries from Jan 1 through Jan 8 of the current year
+  // were paid out on a pay period that started in the prior year (Dec 24 - Jan 8),
+  // so they weren't captured by QB payroll imports targeting 2026 pay dates.
+  // Add them to the hoursUsed count so they're reflected in the PTO summary.
+  const crossoverEnd = `${currentYear}-01-08`;
+  const crossoverStart = `${currentYear}-01-01`;
+  const crossoverResult = await pool.query(
+    `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
+    [empId, crossoverStart, crossoverEnd]
+  );
+  const crossoverDays = parseInt(crossoverResult.rows[0].count) || 0;
+  const crossoverHours = crossoverDays * hoursPerDay;
+  
+  const hoursUsed = qbUsed + crossoverHours;
   const daysUsed = Math.round(hoursUsed / hoursPerDay * 10) / 10;
   const remainingHours = totalAvailableHours - hoursUsed;
   const remainingDays = remainingHours / hoursPerDay;
@@ -378,6 +396,9 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
     totalAvailableHours: Math.round(totalAvailableHours * 100) / 100,
     totalAvailableDays: Math.round(totalAvailableDays * 100) / 100,
     daysUsed, hoursUsed: Math.round(hoursUsed * 100) / 100,
+    qbHoursUsed: Math.round(qbUsed * 100) / 100,
+    crossoverHoursUsed: Math.round(crossoverHours * 100) / 100,
+    crossoverDaysUsed: crossoverDays,
     remainingHours: Math.round(remainingHours * 100) / 100,
     remainingDays: Math.round(remainingDays * 100) / 100,
     unpaidLast6Months, unpaidWarning: unpaidLast6Months > 5,
@@ -504,7 +525,7 @@ app.get('/api/employees', requireAuth, async (req, res) => {
     let query = 'SELECT * FROM employees WHERE is_active = TRUE ORDER BY last_name, first_name';
     let params = [];
     if (user.role === 'director') {
-      query = 'SELECT * FROM employees WHERE is_active = TRUE AND center = $1 ORDER BY last_name, first_name';
+      query = 'SELECT * FROM employees WHERE is_active = TRUE AND COALESCE(payroll_center, center) = $1 ORDER BY last_name, first_name';
       params = [user.center];
     }
     const result = await pool.query(query, params);
@@ -625,8 +646,8 @@ app.get('/api/time-off', requireAuth, async (req, res) => {
     const { month, year, center } = req.query;
     let query = `SELECT toe.*, e.first_name, e.last_name, e.center, e.classroom FROM time_off_entries toe JOIN employees e ON toe.employee_id = e.id WHERE EXTRACT(MONTH FROM toe.entry_date) = $1 AND EXTRACT(YEAR FROM toe.entry_date) = $2`;
     let params = [month || new Date().getMonth() + 1, year || new Date().getFullYear()];
-    if (user.role === 'director') { query += ' AND e.center = $3'; params.push(user.center); }
-    else if (center) { query += ' AND e.center = $3'; params.push(center); }
+    if (user.role === 'director') { query += ' AND COALESCE(e.payroll_center, e.center) = $3'; params.push(user.center); }
+    else if (center) { query += ' AND COALESCE(e.payroll_center, e.center) = $3'; params.push(center); }
     query += ' ORDER BY e.last_name, e.first_name, toe.entry_date';
     const result = await pool.query(query, params);
     res.json(result.rows);
@@ -935,10 +956,10 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
         allDates.push(d.toISOString().split('T')[0]);
     });
     if (allDates.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
-    let empQuery = 'SELECT id, first_name, last_name, center, position FROM employees WHERE is_active = TRUE';
+    let empQuery = 'SELECT id, first_name, last_name, COALESCE(payroll_center, center) as center, position FROM employees WHERE is_active = TRUE';
     let empParams = [];
-    if (centerFilter) { empQuery += ' AND center = $1'; empParams.push(centerFilter); }
-    empQuery += ' ORDER BY center, last_name, first_name';
+    if (centerFilter) { empQuery += ' AND COALESCE(payroll_center, center) = $1'; empParams.push(centerFilter); }
+    empQuery += ' ORDER BY COALESCE(payroll_center, center), last_name, first_name';
     const empsResult = await pool.query(empQuery, empParams);
     const empIds = empsResult.rows.map(e => e.id);
     if (empIds.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
@@ -1066,7 +1087,7 @@ app.put('/api/staffing-plan/:id', requireRole('owner', 'hr', 'director'), async 
   try {
     const d = req.body;
     const result = await pool.query(
-      `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18, external_name=$19, source_center=$20, external_start_date=$21, entry_type=$22 WHERE id=$23 RETURNING *`,
+      `UPDATE staffing_plan SET employee_id=$1, center=$2, classroom=$3, role_in_room=$4, orientation_date=$5, cpr_first_aid_date=$6, health_safety_abc_date=$7, health_safety_refresher=$8, ccbc_consent_date=$9, fingerprinting_date=$10, date_eligible=$11, abuse_neglect_statement=$12, last_evaluation=$13, date_promoted_lead=$14, date_assigned_room=$15, education=$16, semester_hours=$17, infant_toddler_training=$18, external_name=$19, source_center=$20, external_start_date=$21, entry_type=$22, updated_at=NOW() WHERE id=$23 RETURNING *`,
       [d.employee_id || null, d.center, d.classroom, d.role_in_room, d.orientation_date, d.cpr_first_aid_date, d.health_safety_abc_date, d.health_safety_refresher, d.ccbc_consent_date, d.fingerprinting_date, d.date_eligible, d.abuse_neglect_statement, d.last_evaluation, d.date_promoted_lead, d.date_assigned_room, d.education, d.semester_hours, d.infant_toddler_training, d.external_name || null, d.source_center || null, d.external_start_date || null, d.entry_type || 'staff', req.params.id]);
     if (d.employee_id && d.entry_type !== 'sub') await pool.query('UPDATE employees SET classroom = $1, position = $2 WHERE id = $3', [d.classroom, d.role_in_room, d.employee_id]);
     res.json(result.rows[0]);
@@ -1217,6 +1238,17 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     
     // Only show template classrooms + bottom sections, in order
     const orderedClassrooms = [...centerRooms, ...bottomSections].filter(c => classrooms[c] && classrooms[c].length > 0 || bottomSections.includes(c) || centerRooms.includes(c));
+    
+    // Compute most recent update date for this center's staffing plan
+    let lastUpdated = null;
+    spData.rows.forEach(r => {
+      if (r.updated_at) {
+        const d = new Date(r.updated_at);
+        if (!lastUpdated || d > lastUpdated) lastUpdated = d;
+      }
+    });
+    const lastUpdatedStr = lastUpdated ? lastUpdated.toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}) : new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'});
+    
     let tableRows = '';
     for (const cls of orderedClassrooms) {
       const staff = classrooms[cls] || [];
@@ -1228,7 +1260,7 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
         tableRows += `<tr><td>${s.role_in_room||''}</td><td class="name">${nameDisplay}${homeTag}${extTag}</td><td>${fd(s.emp_start_date)}</td><td>${s.emp_schedule||''}</td><td>${fd(s.orientation_date)}</td><td>${fd(s.cpr_first_aid_date)}</td><td>${fd(s.health_safety_abc_date)}</td><td>${fd(s.health_safety_refresher)}</td><td>${fd(s.ccbc_consent_date)}</td><td>${fd(s.fingerprinting_date)}</td><td>${fd(s.date_eligible)}</td><td>${fd(s.abuse_neglect_statement)}</td><td>${fd(s.last_evaluation)}</td><td>${fd(s.date_promoted_lead)}</td><td>${fd(s.date_assigned_room)}</td><td>${s.education||''}</td><td>${s.semester_hours||''}</td><td>${s.infant_toddler_training||''}</td></tr>`;
       });
     }
-    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Staffing Plan — ${centerFull}</title><style>@page{size:landscape;margin:0.3in}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;font-size:7pt;color:#1B2A4A}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #C8963E}.header h1{font-size:11pt;font-weight:700}.header .sub{font-size:7pt;color:#666}.header .sig{text-align:right}.header .sig img{height:25px}table{width:100%;border-collapse:collapse;font-size:6.5pt}th{background:#1B2A4A;color:white;padding:2px 3px;text-align:left;font-weight:600;font-size:6pt;white-space:nowrap}td{padding:2px 3px;border-bottom:0.5px solid #ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}td.name{font-weight:600;max-width:100px}tr.section td{background:#1B2A4A;color:white;font-weight:700;font-size:7pt;padding:3px 5px}tr:nth-child(even):not(.section){background:#f8f9fa}.resp-row{font-size:5.5pt;color:#888;margin-bottom:2px}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body><div class="header"><div><h1>Staffing Plan</h1><div class="sub">${centerFull} · License #${licenseNum}</div><div class="sub">All Staff and Unsupervised Volunteers · ${new Date().toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}</div></div><div class="sig"><div class="sub">Mary Wardlaw, Licensee</div>${sigData?.value ? `<img src="${sigData.value}"><div class="sub">${new Date(sigData.updated_at).toLocaleDateString()}</div>` : ''}</div></div><div class="resp-row">Responsible: Program Director completes Name, Start Date, Schedule, Evaluations, Promoted, Room Assigned · Amy (Dir. Professional Development) completes Orientation, CPR, H&S, CCBC, Fingerprint, Eligible, Abuse/Neglect, Education, Hours, I/T Training</div><table><thead><tr><th>Role</th><th>Name</th><th>Start</th><th>Schedule</th><th>Orient.</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Ref.</th><th>CCBC</th><th>Fingerpr.</th><th>Eligible</th><th>Abuse/Neg.</th><th>Last Eval</th><th>Promoted</th><th>Room Asgn</th><th>Education</th><th>Hrs/CEUs</th><th>I/T Training</th></tr></thead><tbody>${tableRows}</tbody></table><div style="margin-top:12px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #ccc;padding-top:8px"><div style="flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Licensee Signature:</div>${sigData?.value ? '<img src="' + sigData.value + '" style="height:30px;margin-bottom:2px"><br><span style="font-size:6pt;color:#999">Digital signature on file</span>' : '<div style="border-bottom:1px solid #333;width:250px;height:25px;margin-bottom:2px"></div><span style="font-size:6pt;color:#999">Sign here</span>'}</div><div style="text-align:center;flex:1"><div style="font-size:7pt;font-weight:600">Mary Wardlaw, Licensee</div></div><div style="text-align:right;flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Date:</div>${sigData?.value ? '<span style="font-size:8pt">' + new Date(sigData.updated_at).toLocaleDateString() + '</span>' : '<div style="border-bottom:1px solid #333;width:150px;height:20px;display:inline-block"></div>'}</div></div><script>window.onload=function(){window.print()}</script></body></html>`;
+    const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Staffing Plan — ${centerFull}</title><style>@page{size:landscape;margin:0.3in}*{margin:0;padding:0;box-sizing:border-box}body{font-family:Arial,Helvetica,sans-serif;font-size:7pt;color:#1B2A4A}.header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px;padding-bottom:4px;border-bottom:2px solid #C8963E}.header h1{font-size:11pt;font-weight:700}.header .sub{font-size:7pt;color:#666}.header .sig{text-align:right}.header .sig img{height:25px}table{width:100%;border-collapse:collapse;font-size:6.5pt}th{background:#1B2A4A;color:white;padding:2px 3px;text-align:left;font-weight:600;font-size:6pt;white-space:nowrap}td{padding:2px 3px;border-bottom:0.5px solid #ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px}td.name{font-weight:600;max-width:100px}tr.section td{background:#1B2A4A;color:white;font-weight:700;font-size:7pt;padding:3px 5px}tr:nth-child(even):not(.section){background:#f8f9fa}.resp-row{font-size:5.5pt;color:#888;margin-bottom:2px}@media print{body{-webkit-print-color-adjust:exact;print-color-adjust:exact}}</style></head><body><div class="header"><div><h1>Staffing Plan</h1><div class="sub">${centerFull} · License #${licenseNum}</div><div class="sub">All Staff and Unsupervised Volunteers · Plan last updated: ${lastUpdatedStr}</div></div><div class="sig"><div class="sub">Mary Wardlaw, Licensee</div>${sigData?.value ? `<img src="${sigData.value}"><div class="sub">${new Date(sigData.updated_at).toLocaleDateString()}</div>` : ''}</div></div><div class="resp-row">Responsible: Program Director completes Name, Start Date, Schedule, Evaluations, Promoted, Room Assigned · Amy (Dir. Professional Development) completes Orientation, CPR, H&S, CCBC, Fingerprint, Eligible, Abuse/Neglect, Education, Hours, I/T Training</div><table><thead><tr><th>Role</th><th>Name</th><th>Start</th><th>Schedule</th><th>Orient.</th><th>CPR/FA</th><th>H&S ABC</th><th>H&S Ref.</th><th>CCBC</th><th>Fingerpr.</th><th>Eligible</th><th>Abuse/Neg.</th><th>Last Eval</th><th>Promoted</th><th>Room Asgn</th><th>Education</th><th>Hrs/CEUs</th><th>I/T Training</th></tr></thead><tbody>${tableRows}</tbody></table><div style="margin-top:12px;display:flex;justify-content:space-between;align-items:flex-end;border-top:1px solid #ccc;padding-top:8px"><div style="flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Licensee Signature:</div>${sigData?.value ? '<img src="' + sigData.value + '" style="height:30px;margin-bottom:2px"><br><span style="font-size:6pt;color:#999">Digital signature on file</span>' : '<div style="border-bottom:1px solid #333;width:250px;height:25px;margin-bottom:2px"></div><span style="font-size:6pt;color:#999">Sign here</span>'}</div><div style="text-align:center;flex:1"><div style="font-size:7pt;font-weight:600">Mary Wardlaw, Licensee</div></div><div style="text-align:right;flex:1"><div style="font-size:7pt;font-weight:600;color:#666;margin-bottom:2px">Date:</div>${sigData?.value ? '<span style="font-size:8pt">' + new Date(sigData.updated_at).toLocaleDateString() + '</span>' : '<div style="border-bottom:1px solid #333;width:150px;height:20px;display:inline-block"></div>'}</div></div><script>window.onload=function(){window.print()}</script></body></html>`;
     res.send(html);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1306,6 +1338,24 @@ app.post('/api/payroll-workflow/unsubmit-timeoff', requireAuth, async (req, res)
     const pp = await pool.query(`SELECT payroll_accessed_at, payroll_closed FROM payroll_periods WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
     if (pp.rows.length > 0 && pp.rows[0].payroll_accessed_at) return res.status(403).json({ error: 'locked', message: 'Payroll processing has already begun. Submit a change request for Jared to approve.' });
     await pool.query(`UPDATE payroll_periods SET timeoff_submitted = FALSE, timeoff_submitted_by = NULL, timeoff_submitted_at = NULL WHERE period_start = $1 AND period_end = $2 AND center = $3`, [period_start, period_end, center]);
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Force-unlock: owner/payroll only — clears ALL signoff fields including payroll_accessed_at
+// Used when a director accidentally signs off too early or in the wrong period
+app.post('/api/payroll-workflow/force-unlock-timeoff', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, center } = req.body;
+    await pool.query(
+      `UPDATE payroll_periods SET 
+        timeoff_submitted = FALSE, timeoff_submitted_by = NULL, timeoff_submitted_at = NULL,
+        timeoff_approved = FALSE, timeoff_signed_by = NULL, timeoff_signed_at = NULL,
+        change_request_pending = FALSE, change_request_reason = NULL,
+        payroll_accessed_at = NULL
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1650,7 +1700,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const user = req.session.user;
-    const empQuery = `SELECT e.* FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY e.center, e.last_name, e.first_name`;
+    const empQuery = `SELECT e.*, COALESCE(e.payroll_center, e.center) as effective_payroll_center FROM employees e WHERE (e.is_active = TRUE OR EXISTS (SELECT 1 FROM daily_hours dh WHERE dh.employee_id = e.id AND dh.work_date >= $1 AND dh.work_date <= $2)) ORDER BY COALESCE(e.payroll_center, e.center), e.last_name, e.first_name`;
     const empsResult = await pool.query(empQuery, [pp.start, pp.end]);
     let empRows = empsResult.rows.filter(e => !shouldHideFromUser(e, user));
     const report = [];
@@ -1690,7 +1740,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
       const increases = await pool.query(`SELECT * FROM pay_increase_requests WHERE employee_id = $1 AND status = 'approved' AND reviewed_at >= $2 AND reviewed_at <= $3`, [emp.id, pp.start + 'T00:00:00', pp.end + 'T23:59:59']);
       report.push({
         id: emp.id, first_name: emp.first_name, last_name: emp.last_name,
-        center: emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
+        center: emp.effective_payroll_center || emp.center, position: emp.position, hourly_rate: emp.hourly_rate,
         is_full_time: emp.is_full_time, start_date: emp.start_date,
         totalHours: Math.round(totalHours * 100) / 100,
         regularHours: Math.round(periodRegular * 100) / 100,
