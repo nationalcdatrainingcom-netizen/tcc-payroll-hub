@@ -1700,6 +1700,28 @@ async function forceUnlockTimeOff() {
   } catch(e) { alert('Error: ' + e.message); }
 }
 
+async function forceUnlockTimecards() {
+  const center = currentUser.role === 'director' ? currentUser.center : selectedCenter;
+  const pp = (currentUser.role === 'director' && dirPayrollPP) ? dirPayrollPP : payPeriod;
+  const clearHours = confirm(`Force unlock timecards for ${center} (${pp.label || pp.start + ' to ' + pp.end})?\n\nThis will:\n• Clear the timecard upload/signoff status\n• Allow the director to re-upload\n\nClick OK to also DELETE the imported hours for this period (so the new upload replaces them).\nClick Cancel to keep existing hours (new upload will use the higher value for each day).`);
+  
+  // Even if they clicked Cancel on the clearHours prompt, still confirm they want to unlock
+  if (!confirm(`Proceed with unlocking timecards for ${center}?${clearHours ? '\n\n⚠️ Imported hours for this period WILL be deleted.' : '\n\nExisting hours will be kept. New upload will use the higher value.'}`)) return;
+  
+  try {
+    const res = await fetch('/api/payroll-workflow/force-unlock-timecards', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ period_start: pp.start, period_end: pp.end, center, clear_hours: clearHours })
+    });
+    const data = await res.json();
+    if (!res.ok) { alert(data.message || data.error); return; }
+    alert(`Timecards for ${center} have been unlocked.${data.hoursCleared ? ' Imported hours were cleared.' : ' Existing hours were kept.'}\nThe director can now re-upload.`);
+    if (currentUser.role === 'director') renderDirectorPayroll();
+    else if (typeof renderPayrollProcessing === 'function') renderPayrollProcessing();
+  } catch(e) { alert('Error: ' + e.message); }
+}
+
 async function requestTimeOffChange() {
   const reason = prompt('Describe what needs to change and why:');
   if (!reason) return;
@@ -2527,6 +2549,7 @@ async function renderPayroll() {
         <div style="font-size:20px">${pp.timecards_uploaded?'✅':'1️⃣'}</div>
         <div style="font-size:11px;font-weight:700;margin-top:4px">Timecards</div>
         ${pp.timecards_signed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">Signed: ${pp.timecards_signed_by}</div>` : ''}
+        ${isPayroll && (pp.timecards_uploaded || pp.timecards_signed_by) ? `<button class="btn btn-outline btn-sm" onclick="forceUnlockTimecards()" style="margin-top:6px;padding:2px 8px;font-size:10px;color:var(--danger);border-color:var(--danger)" title="Clear timecard signoff and allow re-upload">🔓 Unlock</button>` : ''}
       </div>
       <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.timeoff_approved||pp.timeoff_submitted?'var(--success-bg)':'var(--gray-100)'}">
         <div style="font-size:20px">${pp.timeoff_approved||pp.timeoff_submitted?'✅':'2️⃣'}</div>
@@ -2820,17 +2843,35 @@ async function uploadQBPayroll() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error);
     
-    let html = `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-bottom:12px">
-      <div style="font-weight:700;color:#27500A;margin-bottom:8px">✅ QuickBooks report processed</div>
-      <div style="font-size:12px;color:#3B6D11">${data.dateRange}</div>
-      <div style="font-size:12px;color:#3B6D11">${data.totalEmployeesWithPTO} employees with PTO hours, ${data.matched} matched</div>
-    </div>`;
+    let html = '';
+    
+    if (data.totalEmployeesWithPTO === 0) {
+      html += `<div style="background:var(--warning-bg);border:2px solid var(--warning);border-radius:8px;padding:16px;margin-bottom:12px">
+        <div style="font-weight:700;color:var(--warning);margin-bottom:8px">⚠️ No PTO Hours Found in Report</div>
+        <div style="font-size:13px;color:var(--navy);margin-bottom:8px">The system read ${data.debug?.totalRows || '?'} rows from the spreadsheet but couldn't find any PTO pay items.</div>
+        <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px">
+          <strong>Expected format:</strong> QuickBooks "Payroll Summary" report exported as .xlsx. The system looks for employee names in the format "Last, First" followed by pay types like "Paid Time Off", "PTO", "Vacation", etc.
+        </div>
+        ${data.debug?.sampleRows ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--info)">Show what the system read (first 10 rows)</summary>
+          <div style="background:white;padding:8px;border-radius:4px;margin-top:4px;font-family:'JetBrains Mono',monospace;font-size:10px;max-height:200px;overflow:auto">
+            ${data.debug.sampleRows.map(r => '<div style="margin-bottom:2px"><span style="color:var(--gray-400)">Row ' + r.row + ':</span> ' + (r.cols||[]).map(c => '<span style="background:var(--gray-100);padding:1px 4px;border-radius:2px;margin-right:4px">' + String(c||'').substring(0,40) + '</span>').join(' ') + '</div>').join('')}
+          </div>
+        </details>` : ''}
+      </div>`;
+    } else {
+      html += `<div style="background:#EAF3DE;border:1px solid #639922;border-radius:8px;padding:14px;margin-bottom:12px">
+        <div style="font-weight:700;color:#27500A;margin-bottom:8px">✅ QuickBooks report processed</div>
+        <div style="font-size:12px;color:#3B6D11">${data.dateRange || 'Date range not detected'}</div>
+        <div style="font-size:12px;color:#3B6D11">${data.totalEmployeesWithPTO} employees with PTO hours, ${data.matched} matched to roster</div>
+      </div>`;
+    }
     
     if (data.results && data.results.length > 0) {
-      html += `<table class="data-table" style="font-size:12px"><thead><tr><th>Employee</th><th>PTO This Period</th><th>New YTD Total</th></tr></thead><tbody>`;
+      html += `<table class="data-table" style="font-size:12px"><thead><tr><th>Employee</th><th>Pay Type</th><th>PTO This Period</th><th>New YTD Total</th></tr></thead><tbody>`;
       data.results.forEach(r => {
-        html += `<tr><td>${r.name}</td><td style="font-weight:600">${r.hours}h</td>
-          <td>${r.newTotal !== null ? r.newTotal + 'h' : '<span style="color:var(--danger)">' + (r.error||'Error') + '</span>'}</td></tr>`;
+        const types = r.types ? r.types.map(t => t.type).join(', ') : '';
+        html += `<tr><td>${r.name}</td><td style="font-size:10px;color:var(--gray-600)">${types}</td><td style="font-weight:600">${r.hours.toFixed(1)}h</td>
+          <td>${r.newTotal !== null ? r.newTotal.toFixed(1) + 'h' : '<span style="color:var(--danger)">' + (r.error||'Error') + '</span>'}</td></tr>`;
       });
       html += `</tbody></table>`;
     }
