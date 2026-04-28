@@ -1035,7 +1035,6 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     }));
     // Log every upload for audit trail
     const currentPP = getPayPeriod(new Date());
-    const uploadCenter = req.session.user.center || req.body?.center || 'Unknown';
     try {
       await pool.query(
         `INSERT INTO upload_log (center, period_start, period_end, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, unmatched_rows, unmatched_names, saved_days)
