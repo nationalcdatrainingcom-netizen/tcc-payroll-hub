@@ -162,8 +162,9 @@ async function initDB() {
       work_date DATE NOT NULL,
       hours_worked NUMERIC(5,2) DEFAULT 0,
       source VARCHAR(50) DEFAULT 'import',
+      source_center VARCHAR(100),
       created_at TIMESTAMP DEFAULT NOW(),
-      UNIQUE(employee_id, work_date)
+      UNIQUE(employee_id, work_date, source_center)
     );
     CREATE TABLE IF NOT EXISTS staffing_plan (
       id SERIAL PRIMARY KEY,
@@ -226,6 +227,13 @@ async function initDB() {
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
   // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
+  // daily_hours: add source_center for cross-center hour tracking
+  await pool.query(`ALTER TABLE daily_hours ADD COLUMN IF NOT EXISTS source_center VARCHAR(100)`);
+  // Migrate unique constraint: old was (employee_id, work_date), new is (employee_id, work_date, source_center)
+  try {
+    await pool.query(`ALTER TABLE daily_hours DROP CONSTRAINT IF EXISTS daily_hours_employee_id_work_date_key`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_hours_emp_date_center ON daily_hours (employee_id, work_date, COALESCE(source_center, 'unknown'))`);
+  } catch(e) { console.log('Daily hours constraint migration:', e.message); }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -1003,12 +1011,20 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       } else { unmatched++; unmatchedNames.add(`${lastName}, ${firstName}`); }
     }
     let savedDays = 0;
+    // Determine uploading center for source tracking
+    const uploadCenter = req.session.user.center || req.body?.center || 'Unknown';
     for (const [key, hours] of Object.entries(dailySummary)) {
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
-      await pool.query(`INSERT INTO daily_hours (employee_id, work_date, hours_worked, source) VALUES ($1, $2, $3, 'import') ON CONFLICT (employee_id, work_date) DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
-        [parseInt(eid), dt, Math.round(hours * 100) / 100]);
+      // Use source_center so staff working at multiple locations get separate rows per center
+      // Same center re-uploading will REPLACE (GREATEST), different centers will ADD (separate rows)
+      await pool.query(
+        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) 
+         VALUES ($1, $2, $3, 'import', $4) 
+         ON CONFLICT (employee_id, work_date, COALESCE(source_center, 'unknown')) 
+         DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
+        [parseInt(eid), dt, Math.round(hours * 100) / 100, uploadCenter]);
       savedDays++;
     }
     const preview = results.slice(0, 40).map(r => ({
@@ -1507,8 +1523,8 @@ app.post('/api/payroll-workflow/force-unlock-timecards', requireRole('owner', 'p
       const ids = empIds.rows.map(r => r.id);
       if (ids.length > 0) {
         await pool.query(
-          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import'`,
-          [ids, period_start, period_end]
+          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import' AND (source_center = $4 OR source_center IS NULL)`,
+          [ids, period_start, period_end, center]
         );
       }
     }
