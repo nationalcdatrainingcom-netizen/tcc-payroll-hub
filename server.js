@@ -278,6 +278,24 @@ async function initDB() {
   // Backfill: any rows where updated_at is NULL get set to created_at
   await pool.query(`UPDATE staffing_plan SET updated_at = created_at WHERE updated_at IS NULL`);
 
+  // Upload log: track every CSV import for audit trail
+  await pool.query(`CREATE TABLE IF NOT EXISTS upload_log (
+    id SERIAL PRIMARY KEY,
+    center VARCHAR(100),
+    period_start DATE, period_end DATE,
+    upload_type VARCHAR(50) DEFAULT 'timecard',
+    filename VARCHAR(500),
+    uploaded_by VARCHAR(200),
+    uploaded_by_user_id INTEGER,
+    total_rows INTEGER DEFAULT 0,
+    matched_rows INTEGER DEFAULT 0,
+    unmatched_rows INTEGER DEFAULT 0,
+    unmatched_names TEXT,
+    saved_days INTEGER DEFAULT 0,
+    notes TEXT,
+    uploaded_at TIMESTAMP DEFAULT NOW()
+  )`);
+
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
     const hash = await bcrypt.hash('tcc2026', 10);
@@ -761,26 +779,83 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     const wb = XLSX.read(req.file.buffer);
     const ws = wb.Sheets[wb.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    const skipTypes = new Set(['Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions','Health Insurance','Salary','Bonus','']);
+    
+    // Debug: capture what was actually read
+    const debugInfo = {
+      sheetNames: wb.SheetNames,
+      totalRows: data.length,
+      sampleRows: data.slice(0, 15).map((r, i) => ({ row: i, cols: r.slice(0, 6) })),
+      filename: req.file?.originalname || 'unknown'
+    };
+    
+    // Types to skip — these are regular payroll, not PTO
+    const skipTypes = new Set([
+      'Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions',
+      'Health Insurance','Salary','Bonus','Net Pay','Total','Check Amount',
+      'Tax','Federal','State','Social Security','Medicare',
+      'Employee Tax','Employer Tax','Deduction','Contribution','Reimbursement',
+      'Direct Deposit','Wage','Hourly','',
+      // Common lowercase/variations
+      'gross','regular pay','overtime pay','salary','bonus','net pay'
+    ]);
+    
     let currentName = null;
     const ptoPaid = {};
     let dateRange = '';
+    const parseLog = []; // track what we found for debugging
+    
     for (let i = 0; i < data.length; i++) {
       const row = data[i];
+      if (!row || row.length === 0) continue;
       const col0 = String(row[0] || '').trim();
       const col1 = String(row[1] || '').trim();
       const col2 = parseFloat(row[2]) || 0;
-      if (col0.startsWith('From ')) dateRange = col0;
-      if (col0 && col0.includes(',') && col1 === 'Gross') currentName = col0;
-      if (currentName && col1 && !skipTypes.has(col1) && col2 > 0) {
-        if (!ptoPaid[currentName]) ptoPaid[currentName] = 0;
-        ptoPaid[currentName] += col2;
+      const col3 = parseFloat(row[3]) || 0;
+      
+      // Detect date range (various QB formats)
+      if (col0.startsWith('From ') || col0.match(/\d{1,2}\/\d{1,2}\/\d{2,4}\s*(to|-|through)\s*\d{1,2}\/\d{1,2}\/\d{2,4}/i)) {
+        dateRange = col0;
+      }
+      
+      // Detect employee name: "Last, First" pattern where next column says Gross or is empty
+      if (col0 && col0.includes(',') && !col0.startsWith('From') && !col0.startsWith('Total')) {
+        // Could be a name if followed by Gross or if it looks like "LastName, FirstName"
+        const nameParts = col0.split(',');
+        if (nameParts.length >= 2 && nameParts[0].trim().length > 0 && nameParts[1].trim().length > 0) {
+          if (col1 === 'Gross' || col1 === '' || col1 === 'Total') {
+            currentName = col0;
+            parseLog.push({ row: i, action: 'name', name: currentName });
+            continue;
+          }
+        }
+      }
+      
+      // If we have a current employee, check for PTO-type pay items
+      if (currentName && col1) {
+        const payType = col1.toLowerCase();
+        const isSkipType = skipTypes.has(col1) || skipTypes.has(payType) || 
+          payType.includes('tax') || payType.includes('deduction') || 
+          payType.includes('deposit') || payType.includes('insurance') ||
+          payType.includes('contribution') || payType.includes('garnish') ||
+          payType.includes('withhold') || payType.includes('reimburs');
+        
+        if (!isSkipType && (col2 > 0 || col3 > 0)) {
+          const hours = col2 > 0 ? col2 : col3;
+          if (!ptoPaid[currentName]) ptoPaid[currentName] = { hours: 0, types: [] };
+          ptoPaid[currentName].hours += hours;
+          ptoPaid[currentName].types.push({ type: col1, hours });
+          parseLog.push({ row: i, action: 'pto', name: currentName, type: col1, hours });
+        }
       }
     }
-    for (const name of Object.keys(ptoPaid)) { if (ptoPaid[name] > 200) delete ptoPaid[name]; }
+    
+    // Sanity check: remove anyone with >200 hours (probably misparse)
+    for (const name of Object.keys(ptoPaid)) { if (ptoPaid[name].hours > 200) delete ptoPaid[name]; }
+    
     let matched = 0;
     const results = [];
-    for (const [name, hours] of Object.entries(ptoPaid)) {
+    for (const [name, info] of Object.entries(ptoPaid)) {
+      const hours = info.hours;
       const parts = name.split(',').map(s => s.trim());
       if (parts.length < 2) continue;
       const last = parts[0]; const first = parts[1].split(' ')[0];
@@ -791,11 +866,24 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
         const e = emp.rows[0];
         const newTotal = parseFloat(e.pto_hours_used_qb || 0) + hours;
         await pool.query('UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2', [newTotal, e.id]);
-        results.push({ name: `${e.last_name}, ${e.first_name}`, hours, newTotal });
+        results.push({ name: `${e.last_name}, ${e.first_name}`, hours, types: info.types, newTotal });
         matched++;
-      } else { results.push({ name, hours, newTotal: null, error: 'Not found' }); }
+      } else { results.push({ name, hours, types: info.types, newTotal: null, error: 'Not found' }); }
     }
-    res.json({ dateRange, totalEmployeesWithPTO: Object.keys(ptoPaid).length, matched, results });
+    // Log the upload
+    try {
+      await pool.query(
+        `INSERT INTO upload_log (center, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, notes)
+         VALUES ('All', 'qb-payroll', $1, $2, $3, $4, $5, $6)`,
+        [req.file?.originalname, req.session.user.full_name, req.session.user.id, data.length, matched,
+         JSON.stringify({ dateRange, parseLog: parseLog.slice(0, 30), totalPTOEmployees: Object.keys(ptoPaid).length })]
+      );
+    } catch(logErr) { console.error('Upload log error:', logErr.message); }
+    
+    res.json({ 
+      dateRange, totalEmployeesWithPTO: Object.keys(ptoPaid).length, matched, results,
+      debug: { totalRows: data.length, sampleRows: debugInfo.sampleRows, parseLog: parseLog.slice(0, 20) }
+    });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -929,10 +1017,20 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       breaks: (r['Breaks']||'').trim(), billable: (r['Billable']||'').trim(),
       hours: parseBillableHours((r['Billable']||'').trim()).toFixed(2)
     }));
+    // Log every upload for audit trail
+    const currentPP = getPayPeriod(new Date());
+    const uploadCenter = req.session.user.center || req.body?.center || 'Unknown';
+    try {
+      await pool.query(
+        `INSERT INTO upload_log (center, period_start, period_end, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, unmatched_rows, unmatched_names, saved_days)
+         VALUES ($1,$2,$3,'timecard',$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [uploadCenter, currentPP.start, currentPP.end, req.file?.originalname || 'unknown', req.session.user.full_name, req.session.user.id, totalRows, matched, unmatched, [...unmatchedNames].join(', '), savedDays]
+      );
+    } catch(logErr) { console.error('Upload log error:', logErr.message); }
     res.json({
       imported: totalRows, matched, unmatched,
       unmatchedNames: [...unmatchedNames], savedDays, preview,
-      payPeriod: getPayPeriod(new Date())
+      payPeriod: currentPP
     });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -1386,6 +1484,53 @@ app.post('/api/payroll-workflow/force-unlock-timeoff', requireRole('owner', 'pay
       [period_start, period_end, center]
     );
     res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Force-unlock timecards: owner/payroll only — clears timecard signoff AND deletes imported hours for the period
+app.post('/api/payroll-workflow/force-unlock-timecards', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const { period_start, period_end, center, clear_hours } = req.body;
+    // Reset the timecard workflow flags
+    await pool.query(
+      `UPDATE payroll_periods SET 
+        timecards_uploaded = FALSE, timecards_signed_by = NULL, timecards_signed_at = NULL,
+        director_closed = FALSE, director_closed_by = NULL, director_closed_at = NULL,
+        payroll_accessed_at = NULL
+       WHERE period_start = $1 AND period_end = $2 AND center = $3`,
+      [period_start, period_end, center]
+    );
+    // Optionally clear the imported daily_hours so they can be re-uploaded
+    if (clear_hours) {
+      const empIds = await pool.query(
+        `SELECT id FROM employees WHERE COALESCE(payroll_center, center) = $1 AND is_active = TRUE`, [center]);
+      const ids = empIds.rows.map(r => r.id);
+      if (ids.length > 0) {
+        await pool.query(
+          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import'`,
+          [ids, period_start, period_end]
+        );
+      }
+    }
+    res.json({ ok: true, hoursCleared: !!clear_hours });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Upload log: retrieve history of CSV uploads for a center/period
+app.get('/api/upload-log', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
+  try {
+    const { center, period_start, period_end } = req.query;
+    let query = 'SELECT * FROM upload_log ORDER BY uploaded_at DESC LIMIT 50';
+    let params = [];
+    if (center && period_start && period_end) {
+      query = 'SELECT * FROM upload_log WHERE center = $1 AND period_start = $2 AND period_end = $3 ORDER BY uploaded_at DESC';
+      params = [center, period_start, period_end];
+    } else if (center) {
+      query = 'SELECT * FROM upload_log WHERE center = $1 ORDER BY uploaded_at DESC LIMIT 20';
+      params = [center];
+    }
+    const result = await pool.query(query, params);
+    res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
