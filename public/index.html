@@ -2756,6 +2756,8 @@ async function importTimecard() {
   
   const fd = new FormData();
   fd.append('file', file);
+  // Pass the selected center so cross-center hours are tagged correctly
+  fd.append('center', selectedCenter || currentUser.center || 'Unknown');
   
   const resultEl = document.getElementById('importResult');
   resultEl.innerHTML = '<em style="color:var(--gray-400)">Processing CSV...</em>';
