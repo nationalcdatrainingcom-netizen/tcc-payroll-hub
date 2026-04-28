@@ -1012,7 +1012,7 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     }
     let savedDays = 0;
     // Determine uploading center for source tracking
-    const uploadCenter = req.session.user.center || req.body?.center || 'Unknown';
+    const uploadCenter = req.body?.center || req.session.user.center || 'Unknown';
     for (const [key, hours] of Object.entries(dailySummary)) {
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
