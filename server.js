@@ -1017,6 +1017,11 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
+      // Clean up any old rows with NULL source_center for this employee/date
+      // (from before the cross-center fix) to prevent double-counting
+      await pool.query(
+        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND source_center IS NULL`,
+        [parseInt(eid), dt]);
       // Use source_center so staff working at multiple locations get separate rows per center
       // Same center re-uploading will REPLACE (GREATEST), different centers will ADD (separate rows)
       await pool.query(
