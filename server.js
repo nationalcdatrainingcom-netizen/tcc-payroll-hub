@@ -1849,35 +1849,84 @@ async function generatePayrollPDF(pp, report, terminations, newHireW4s) {
     if (newHireW4s && newHireW4s.length > 0) {
       for (const emp of newHireW4s) {
         if (emp.w4Data && emp.w4Data.length > 0) {
-          doc.addPage();
-          doc.rect(0, 0, 612, 40).fill(navy);
-          doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
-            .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
-          doc.fill(gold).fontSize(9).font('Helvetica')
-            .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
           try {
             const imgBuffer = Buffer.from(emp.w4Data);
             const isJpeg = imgBuffer[0] === 0xFF && imgBuffer[1] === 0xD8;
             const isPng = imgBuffer[0] === 0x89 && imgBuffer[1] === 0x50;
+            const isPdf = imgBuffer[0] === 0x25 && imgBuffer[1] === 0x50; // %P (PDF magic bytes)
+            
             if (isJpeg || isPng) {
+              // Image W-4: embed directly
+              doc.addPage();
+              doc.rect(0, 0, 612, 40).fill(navy);
+              doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
+                .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
+              doc.fill(gold).fontSize(9).font('Helvetica')
+                .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
               doc.image(imgBuffer, 40, 50, { fit: [pageW, 680], align: 'center' });
+            } else if (isPdf) {
+              // PDF W-4: convert each page to PNG using pdftoppm, then embed
+              const tmpPdf = `/tmp/w4_${emp.id}_${Date.now()}.pdf`;
+              const tmpPrefix = `/tmp/w4_${emp.id}_${Date.now()}`;
+              fs.writeFileSync(tmpPdf, imgBuffer);
+              try {
+                const { execSync } = require('child_process');
+                execSync(`pdftoppm -png -r 200 "${tmpPdf}" "${tmpPrefix}"`, { timeout: 15000 });
+                // Find all generated page images
+                const pageFiles = fs.readdirSync('/tmp')
+                  .filter(f => f.startsWith(`w4_${emp.id}_`) && f.endsWith('.png'))
+                  .sort()
+                  .map(f => `/tmp/${f}`);
+                for (let pi = 0; pi < pageFiles.length; pi++) {
+                  doc.addPage();
+                  doc.rect(0, 0, 612, 40).fill(navy);
+                  doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
+                    .text(`W-4 — ${emp.first_name} ${emp.last_name}${pageFiles.length > 1 ? ` (page ${pi+1})` : ''}`, 40, 12);
+                  doc.fill(gold).fontSize(9).font('Helvetica')
+                    .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
+                  doc.image(pageFiles[pi], 20, 45, { fit: [572, 700], align: 'center' });
+                }
+                // Cleanup temp files
+                try { fs.unlinkSync(tmpPdf); } catch(e){}
+                pageFiles.forEach(f => { try { fs.unlinkSync(f); } catch(e){} });
+              } catch(convErr) {
+                console.error('W-4 PDF conversion error:', convErr.message);
+                doc.addPage();
+                doc.rect(0, 0, 612, 40).fill(navy);
+                doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
+                  .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
+                doc.fill(gold).fontSize(9).font('Helvetica')
+                  .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
+                doc.fill(gray).fontSize(11).font('Helvetica')
+                  .text('W-4 document could not be converted for embedding. See Document Center for the original file.', 40, 60);
+                try { fs.unlinkSync(tmpPdf); } catch(e){}
+              }
             } else {
+              // Unknown format
+              doc.addPage();
+              doc.rect(0, 0, 612, 40).fill(navy);
+              doc.fill('#FFFFFF').fontSize(12).font('Helvetica-Bold')
+                .text(`W-4 — ${emp.first_name} ${emp.last_name}`, 40, 12);
+              doc.fill(gold).fontSize(9).font('Helvetica')
+                .text(`${emp.center} · Start Date: ${emp.start_date ? new Date(emp.start_date).toLocaleDateString() : ''}`, 40, 28);
               doc.fill(gray).fontSize(11).font('Helvetica')
-                .text('W-4 document attached (non-image format — see original file in Document Center)', 40, 60);
+                .text('W-4 document attached (unsupported format — see original file in Document Center)', 40, 60);
             }
           } catch(imgErr) {
-            doc.fill(gray).fontSize(11).font('Helvetica')
-              .text('W-4 document could not be rendered. See Document Center for the original file.', 40, 60);
+            console.error('W-4 embed error:', imgErr.message);
           }
         }
       }
     }
-    const totalPages = doc.bufferedPageRange().count;
-    for (let i = 0; i < totalPages; i++) {
+    // Add page footers — switch to each page and add footer text
+    const range = doc.bufferedPageRange();
+    for (let i = range.start; i < range.start + range.count; i++) {
       doc.switchToPage(i);
       doc.fill(gray).fontSize(7).font('Helvetica')
-        .text(`TCC Payroll Report · ${pp.label} · Page ${i + 1} of ${totalPages}`, 40, 750, { align: 'center', width: pageW });
+        .text(`TCC Payroll Report · ${pp.label} · Page ${i + 1} of ${range.count}`, 40, 750, { align: 'center', width: pageW });
     }
+    // Must flush pages before ending to prevent phantom pages
+    doc.flushPages();
     doc.end();
   });
 }
