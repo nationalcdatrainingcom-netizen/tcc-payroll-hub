@@ -1019,29 +1019,38 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     // Determine uploading center for source tracking
     const uploadCenter = req.body?.center || req.session.user.center || 'Unknown';
     console.log('[TIMECARD IMPORT] uploadCenter:', uploadCenter, '| req.body.center:', req.body?.center, '| session.center:', req.session.user.center, '| user:', req.session.user.username);
-    let oldRowsDeleted = 0;
+    
+    // Collect all employee IDs and dates from this upload
+    const empDates = new Set();
+    const empIds = new Set();
+    for (const key of Object.keys(dailySummary)) {
+      const firstDash = key.indexOf('-');
+      empIds.add(parseInt(key.substring(0, firstDash)));
+      empDates.add(key);
+    }
+    
+    // Delete ALL old rows for these employees/dates that came from this same center OR from 'default'/'Unknown'
+    // This ensures a clean slate — re-uploading the same center's CSV replaces, not accumulates
     for (const [key, hours] of Object.entries(dailySummary)) {
       const firstDash = key.indexOf('-');
-      const eid = key.substring(0, firstDash);
+      const eid = parseInt(key.substring(0, firstDash));
       const dt = key.substring(firstDash + 1);
-      // Clean up old rows tagged with 'default' or 'Unknown' for this employee/date
-      // (from before the cross-center fix) to prevent double-counting
-      const delResult = await pool.query(
-        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND source_center IN ('default', 'Unknown')`,
-        [parseInt(eid), dt]);
-      oldRowsDeleted += delResult.rowCount;
-      // Insert with proper source_center tag
-      // Same center re-uploading: GREATEST keeps higher value (no double-count)
-      // Different center: separate row (hours add up in payroll report)
       await pool.query(
-        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) 
-         VALUES ($1, $2, $3, 'import', $4) 
-         ON CONFLICT (employee_id, work_date, source_center) 
-         DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
-        [parseInt(eid), dt, Math.round(hours * 100) / 100, uploadCenter]);
+        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND (source_center IN ($3, 'default', 'Unknown') OR source_center IS NULL)`,
+        [eid, dt, uploadCenter]);
+    }
+    
+    // Now insert fresh rows — no conflict possible since we just deleted
+    for (const [key, hours] of Object.entries(dailySummary)) {
+      const firstDash = key.indexOf('-');
+      const eid = parseInt(key.substring(0, firstDash));
+      const dt = key.substring(firstDash + 1);
+      await pool.query(
+        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) VALUES ($1, $2, $3, 'import', $4)`,
+        [eid, dt, Math.round(hours * 100) / 100, uploadCenter]);
       savedDays++;
     }
-    console.log('[TIMECARD IMPORT] savedDays:', savedDays, '| oldRowsDeleted:', oldRowsDeleted);
+    console.log('[TIMECARD IMPORT] savedDays:', savedDays, '| uploadCenter:', uploadCenter);
     const preview = results.slice(0, 40).map(r => ({
       name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
       date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
