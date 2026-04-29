@@ -162,7 +162,7 @@ async function initDB() {
       work_date DATE NOT NULL,
       hours_worked NUMERIC(5,2) DEFAULT 0,
       source VARCHAR(50) DEFAULT 'import',
-      source_center VARCHAR(100),
+      source_center VARCHAR(100) DEFAULT 'default',
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE(employee_id, work_date, source_center)
     );
@@ -228,12 +228,17 @@ async function initDB() {
   // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
   // daily_hours: add source_center for cross-center hour tracking
-  await pool.query(`ALTER TABLE daily_hours ADD COLUMN IF NOT EXISTS source_center VARCHAR(100)`);
-  // Migrate unique constraint: old was (employee_id, work_date), new is (employee_id, work_date, source_center)
+  await pool.query(`ALTER TABLE daily_hours ADD COLUMN IF NOT EXISTS source_center VARCHAR(100) DEFAULT 'default'`);
+  // Backfill any NULL source_center values
+  await pool.query(`UPDATE daily_hours SET source_center = 'default' WHERE source_center IS NULL`);
+  // Migrate unique constraint: old was (employee_id, work_date), new includes source_center
   try {
     await pool.query(`ALTER TABLE daily_hours DROP CONSTRAINT IF EXISTS daily_hours_employee_id_work_date_key`);
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_hours_emp_date_center ON daily_hours (employee_id, work_date, COALESCE(source_center, 'unknown'))`);
-  } catch(e) { console.log('Daily hours constraint migration:', e.message); }
+  } catch(e) { console.log('Drop old constraint:', e.message); }
+  try {
+    await pool.query(`DROP INDEX IF EXISTS daily_hours_emp_date_center`);
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_hours_emp_date_center ON daily_hours (employee_id, work_date, source_center)`);
+  } catch(e) { console.log('Create new index:', e.message); }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -1013,25 +1018,30 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     let savedDays = 0;
     // Determine uploading center for source tracking
     const uploadCenter = req.body?.center || req.session.user.center || 'Unknown';
+    console.log('[TIMECARD IMPORT] uploadCenter:', uploadCenter, '| req.body.center:', req.body?.center, '| session.center:', req.session.user.center, '| user:', req.session.user.username);
+    let oldRowsDeleted = 0;
     for (const [key, hours] of Object.entries(dailySummary)) {
       const firstDash = key.indexOf('-');
       const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
-      // Clean up any old rows with NULL source_center for this employee/date
+      // Clean up old rows tagged with 'default' or 'Unknown' for this employee/date
       // (from before the cross-center fix) to prevent double-counting
-      await pool.query(
-        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND source_center IS NULL`,
+      const delResult = await pool.query(
+        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND source_center IN ('default', 'Unknown')`,
         [parseInt(eid), dt]);
-      // Use source_center so staff working at multiple locations get separate rows per center
-      // Same center re-uploading will REPLACE (GREATEST), different centers will ADD (separate rows)
+      oldRowsDeleted += delResult.rowCount;
+      // Insert with proper source_center tag
+      // Same center re-uploading: GREATEST keeps higher value (no double-count)
+      // Different center: separate row (hours add up in payroll report)
       await pool.query(
         `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) 
          VALUES ($1, $2, $3, 'import', $4) 
-         ON CONFLICT (employee_id, work_date, COALESCE(source_center, 'unknown')) 
+         ON CONFLICT (employee_id, work_date, source_center) 
          DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
         [parseInt(eid), dt, Math.round(hours * 100) / 100, uploadCenter]);
       savedDays++;
     }
+    console.log('[TIMECARD IMPORT] savedDays:', savedDays, '| oldRowsDeleted:', oldRowsDeleted);
     const preview = results.slice(0, 40).map(r => ({
       name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
       date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
@@ -1527,7 +1537,7 @@ app.post('/api/payroll-workflow/force-unlock-timecards', requireRole('owner', 'p
       const ids = empIds.rows.map(r => r.id);
       if (ids.length > 0) {
         await pool.query(
-          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import' AND (source_center = $4 OR source_center IS NULL)`,
+          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import' AND source_center IN ($4, 'default', 'Unknown')`,
           [ids, period_start, period_end, center]
         );
       }
@@ -1551,6 +1561,18 @@ app.get('/api/upload-log', requireRole('owner', 'payroll', 'hr'), async (req, re
     }
     const result = await pool.query(query, params);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Debug: see all daily_hours rows for an employee (owner/payroll only)
+app.get('/api/debug/daily-hours/:employeeId', requireRole('owner', 'payroll'), async (req, res) => {
+  try {
+    const rows = await pool.query(
+      `SELECT dh.*, e.first_name, e.last_name, e.center, e.payroll_center 
+       FROM daily_hours dh JOIN employees e ON e.id = dh.employee_id 
+       WHERE dh.employee_id = $1 ORDER BY dh.work_date, dh.source_center`,
+      [req.params.employeeId]);
+    res.json({ employeeId: req.params.employeeId, totalRows: rows.rows.length, rows: rows.rows });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
