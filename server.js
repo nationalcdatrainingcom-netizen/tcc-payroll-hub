@@ -1027,7 +1027,7 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
       await pool.query(
         `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) 
          VALUES ($1, $2, $3, 'import', $4) 
-         ON CONFLICT (employee_id, work_date, COALESCE(source_center, 'unknown')) 
+         ON CONFLICT (employee_id, work_date) 
          DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
         [parseInt(eid), dt, Math.round(hours * 100) / 100, uploadCenter]);
       savedDays++;
