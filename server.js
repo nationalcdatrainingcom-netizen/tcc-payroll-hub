@@ -162,7 +162,7 @@ async function initDB() {
       work_date DATE NOT NULL,
       hours_worked NUMERIC(5,2) DEFAULT 0,
       source VARCHAR(50) DEFAULT 'import',
-      source_center VARCHAR(100) DEFAULT 'default',
+      source_center VARCHAR(100),
       created_at TIMESTAMP DEFAULT NOW(),
       UNIQUE(employee_id, work_date, source_center)
     );
@@ -228,17 +228,12 @@ async function initDB() {
   // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
   // daily_hours: add source_center for cross-center hour tracking
-  await pool.query(`ALTER TABLE daily_hours ADD COLUMN IF NOT EXISTS source_center VARCHAR(100) DEFAULT 'default'`);
-  // Backfill any NULL source_center values
-  await pool.query(`UPDATE daily_hours SET source_center = 'default' WHERE source_center IS NULL`);
-  // Migrate unique constraint: old was (employee_id, work_date), new includes source_center
+  await pool.query(`ALTER TABLE daily_hours ADD COLUMN IF NOT EXISTS source_center VARCHAR(100)`);
+  // Migrate unique constraint: old was (employee_id, work_date), new is (employee_id, work_date, source_center)
   try {
     await pool.query(`ALTER TABLE daily_hours DROP CONSTRAINT IF EXISTS daily_hours_employee_id_work_date_key`);
-  } catch(e) { console.log('Drop old constraint:', e.message); }
-  try {
-    await pool.query(`DROP INDEX IF EXISTS daily_hours_emp_date_center`);
-    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_hours_emp_date_center ON daily_hours (employee_id, work_date, source_center)`);
-  } catch(e) { console.log('Create new index:', e.message); }
+    await pool.query(`CREATE UNIQUE INDEX IF NOT EXISTS daily_hours_emp_date_center ON daily_hours (employee_id, work_date, COALESCE(source_center, 'unknown'))`);
+  } catch(e) { console.log('Daily hours constraint migration:', e.message); }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS timeoff_change_requests (
@@ -1018,39 +1013,25 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
     let savedDays = 0;
     // Determine uploading center for source tracking
     const uploadCenter = req.body?.center || req.session.user.center || 'Unknown';
-    console.log('[TIMECARD IMPORT] uploadCenter:', uploadCenter, '| req.body.center:', req.body?.center, '| session.center:', req.session.user.center, '| user:', req.session.user.username);
-    
-    // Collect all employee IDs and dates from this upload
-    const empDates = new Set();
-    const empIds = new Set();
-    for (const key of Object.keys(dailySummary)) {
-      const firstDash = key.indexOf('-');
-      empIds.add(parseInt(key.substring(0, firstDash)));
-      empDates.add(key);
-    }
-    
-    // Delete ALL old rows for these employees/dates that came from this same center OR from 'default'/'Unknown'
-    // This ensures a clean slate — re-uploading the same center's CSV replaces, not accumulates
     for (const [key, hours] of Object.entries(dailySummary)) {
       const firstDash = key.indexOf('-');
-      const eid = parseInt(key.substring(0, firstDash));
+      const eid = key.substring(0, firstDash);
       const dt = key.substring(firstDash + 1);
+      // Clean up any old rows with NULL source_center for this employee/date
+      // (from before the cross-center fix) to prevent double-counting
       await pool.query(
-        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND (source_center IN ($3, 'default', 'Unknown') OR source_center IS NULL)`,
-        [eid, dt, uploadCenter]);
-    }
-    
-    // Now insert fresh rows — no conflict possible since we just deleted
-    for (const [key, hours] of Object.entries(dailySummary)) {
-      const firstDash = key.indexOf('-');
-      const eid = parseInt(key.substring(0, firstDash));
-      const dt = key.substring(firstDash + 1);
+        `DELETE FROM daily_hours WHERE employee_id = $1 AND work_date = $2 AND source_center IS NULL`,
+        [parseInt(eid), dt]);
+      // Use source_center so staff working at multiple locations get separate rows per center
+      // Same center re-uploading will REPLACE (GREATEST), different centers will ADD (separate rows)
       await pool.query(
-        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) VALUES ($1, $2, $3, 'import', $4)`,
-        [eid, dt, Math.round(hours * 100) / 100, uploadCenter]);
+        `INSERT INTO daily_hours (employee_id, work_date, hours_worked, source, source_center) 
+         VALUES ($1, $2, $3, 'import', $4) 
+         ON CONFLICT (employee_id, work_date, COALESCE(source_center, 'unknown')) 
+         DO UPDATE SET hours_worked = GREATEST(daily_hours.hours_worked, $3), source = 'import'`,
+        [parseInt(eid), dt, Math.round(hours * 100) / 100, uploadCenter]);
       savedDays++;
     }
-    console.log('[TIMECARD IMPORT] savedDays:', savedDays, '| uploadCenter:', uploadCenter);
     const preview = results.slice(0, 40).map(r => ({
       name: `${(r['Last Name']||'').trim()}, ${(r['First Name']||'').trim()}`,
       date: (r['Date']||'').trim(), times: (r['Times']||'').trim().replace(/\n/g, ' | '),
@@ -1078,20 +1059,20 @@ app.post('/api/import-timecard', requireRole('owner', 'payroll', 'director'), up
 app.get('/api/overtime/:employeeId', requireAuth, async (req, res) => {
   try {
     const payPeriod = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
-    const weeks = getSunSatWeeks(payPeriod.start, payPeriod.end);
+    const weeks = getMonToSunWeeks(payPeriod.start, payPeriod.end);
     const allDates = [];
     weeks.forEach(w => {
-      for (let d = new Date(w.saturday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
+      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
         allDates.push(d.toISOString().split('T')[0]);
     });
     if (allDates.length === 0) return res.json({ weeks: [], payPeriod });
-    const hours = await pool.query(`SELECT work_date, SUM(hours_worked) as hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2) GROUP BY work_date ORDER BY work_date`, [req.params.employeeId, allDates]);
+    const hours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2) ORDER BY work_date`, [req.params.employeeId, allDates]);
     const hoursMap = {};
-    hours.rows.forEach(h => { const ds = h.work_date.toISOString().split('T')[0]; hoursMap[ds] = (hoursMap[ds] || 0) + parseFloat(h.hours_worked); });
+    hours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
     const weekDetails = weeks.map(w => {
       let totalHours = 0;
       const days = [];
-      for (let d = new Date(w.saturday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
+      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
         const ds = d.toISOString().split('T')[0];
         const h = hoursMap[ds] || 0;
         totalHours += h;
@@ -1109,10 +1090,10 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const centerFilter = req.query.center || null;
-    const weeks = getSunSatWeeks(pp.start, pp.end);
+    const weeks = getMonToSunWeeks(pp.start, pp.end);
     const allDates = [];
     weeks.forEach(w => {
-      for (let d = new Date(w.saturday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
+      for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1))
         allDates.push(d.toISOString().split('T')[0]);
     });
     if (allDates.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
@@ -1124,7 +1105,7 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
     const empIds = empsResult.rows.map(e => e.id);
     if (empIds.length === 0) return res.json({ employees: [], payPeriod: pp, weeks });
     const hoursResult = await pool.query(
-      `SELECT employee_id, work_date, SUM(hours_worked) as hours_worked FROM daily_hours WHERE employee_id = ANY($1) AND work_date = ANY($2) GROUP BY employee_id, work_date`,
+      `SELECT employee_id, work_date, hours_worked FROM daily_hours WHERE employee_id = ANY($1) AND work_date = ANY($2)`,
       [empIds, allDates]
     );
     const hoursLookup = {};
@@ -1132,7 +1113,7 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
       const eid = h.employee_id;
       const ds = h.work_date.toISOString().split('T')[0];
       if (!hoursLookup[eid]) hoursLookup[eid] = {};
-      hoursLookup[eid][ds] = (hoursLookup[eid][ds] || 0) + parseFloat(h.hours_worked);
+      hoursLookup[eid][ds] = parseFloat(h.hours_worked);
     });
     const employeeData = [];
     for (const emp of empsResult.rows) {
@@ -1142,7 +1123,7 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
       for (const w of weeks) {
         let weekTotal = 0, weekInPeriod = 0;
         const days = [];
-        for (let d = new Date(w.saturday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
+        for (let d = new Date(w.monday); d <= new Date(w.sunday); d.setDate(d.getDate() + 1)) {
           const ds = d.toISOString().split('T')[0];
           const h = empHours[ds] || 0;
           weekTotal += h;
@@ -1153,7 +1134,7 @@ app.get('/api/overtime-view', requireRole('owner', 'payroll'), async (req, res) 
         const weekOT = Math.max(0, weekTotal - 40);
         totalInPeriod += weekInPeriod;
         totalOT += weekOT;
-        weekBreakdown.push({ sunday: w.sunday, saturday: w.saturday, days, weekTotal, weekInPeriod, regularHours: Math.min(weekTotal, 40), overtimeHours: weekOT });
+        weekBreakdown.push({ monday: w.monday, sunday: w.sunday, days, weekTotal, weekInPeriod, regularHours: Math.min(weekTotal, 40), overtimeHours: weekOT });
       }
       const hasAnyHours = Object.keys(empHours).length > 0;
       employeeData.push({
@@ -1546,7 +1527,7 @@ app.post('/api/payroll-workflow/force-unlock-timecards', requireRole('owner', 'p
       const ids = empIds.rows.map(r => r.id);
       if (ids.length > 0) {
         await pool.query(
-          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import' AND source_center IN ($4, 'default', 'Unknown')`,
+          `DELETE FROM daily_hours WHERE employee_id = ANY($1) AND work_date >= $2 AND work_date <= $3 AND source = 'import' AND (source_center = $4 OR source_center IS NULL)`,
           [ids, period_start, period_end, center]
         );
       }
@@ -1570,50 +1551,6 @@ app.get('/api/upload-log', requireRole('owner', 'payroll', 'hr'), async (req, re
     }
     const result = await pool.query(query, params);
     res.json(result.rows);
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Debug: see all daily_hours rows for an employee (owner/payroll only)
-app.get('/api/debug/daily-hours/:employeeId', requireRole('owner', 'payroll'), async (req, res) => {
-  try {
-    const rows = await pool.query(
-      `SELECT dh.*, e.first_name, e.last_name, e.center, e.payroll_center 
-       FROM daily_hours dh JOIN employees e ON e.id = dh.employee_id 
-       WHERE dh.employee_id = $1 ORDER BY dh.work_date, dh.source_center`,
-      [req.params.employeeId]);
-    res.json({ employeeId: req.params.employeeId, totalRows: rows.rows.length, rows: rows.rows });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// Emergency cleanup: remove ALL daily_hours rows that don't have a proper center tag
-// Then you can re-upload each center's CSV cleanly
-app.post('/api/admin/cleanup-daily-hours', requireRole('owner'), async (req, res) => {
-  try {
-    const { action, period_start, period_end } = req.body;
-    if (action === 'purge-all-period') {
-      // Nuclear option: delete ALL daily_hours for a date range, then re-upload
-      const result = await pool.query(
-        `DELETE FROM daily_hours WHERE work_date >= $1 AND work_date <= $2`,
-        [period_start, period_end]);
-      return res.json({ ok: true, deleted: result.rowCount, message: `Deleted all ${result.rowCount} daily_hours rows for ${period_start} to ${period_end}. Re-upload all center CSVs now.` });
-    }
-    if (action === 'purge-duplicates') {
-      // Keep only the most recent row per (employee_id, work_date, source_center)
-      // and delete any with NULL or 'default' source_center if a properly tagged one exists
-      const result = await pool.query(
-        `DELETE FROM daily_hours WHERE source_center IS NULL OR source_center IN ('default', 'Unknown')`);
-      return res.json({ ok: true, deleted: result.rowCount, message: `Deleted ${result.rowCount} untagged rows.` });
-    }
-    if (action === 'show-stats') {
-      const stats = await pool.query(
-        `SELECT source_center, COUNT(*) as count, MIN(work_date) as earliest, MAX(work_date) as latest 
-         FROM daily_hours GROUP BY source_center ORDER BY count DESC`);
-      const dupes = await pool.query(
-        `SELECT employee_id, work_date, COUNT(*) as row_count, array_agg(source_center) as centers
-         FROM daily_hours GROUP BY employee_id, work_date HAVING COUNT(*) > 1 ORDER BY row_count DESC LIMIT 20`);
-      return res.json({ stats: stats.rows, duplicates: dupes.rows });
-    }
-    res.status(400).json({ error: 'Unknown action. Use: show-stats, purge-duplicates, or purge-all-period' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -1707,7 +1644,7 @@ app.get('/api/payroll-report', requireRole('owner', 'payroll', 'hr'), async (req
         for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
           allDates.add(d.toISOString().split('T')[0]);
       });
-      const allHours = await pool.query(`SELECT work_date, SUM(hours_worked) as hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2) GROUP BY work_date`, [emp.id, [...allDates]]);
+      const allHours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`, [emp.id, [...allDates]]);
       const hoursMap = {};
       allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
       let totalHours = 0;
@@ -1968,7 +1905,7 @@ app.get('/api/payroll-report/pdf', requireRole('owner', 'payroll'), async (req, 
         for (let d = new Date(w.sunday + 'T12:00:00'); d <= new Date(w.saturday + 'T12:00:00'); d.setDate(d.getDate() + 1))
           allDates.add(d.toISOString().split('T')[0]);
       });
-      const allHours = await pool.query(`SELECT work_date, SUM(hours_worked) as hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2) GROUP BY work_date`, [emp.id, [...allDates]]);
+      const allHours = await pool.query(`SELECT work_date, hours_worked FROM daily_hours WHERE employee_id = $1 AND work_date = ANY($2)`, [emp.id, [...allDates]]);
       const hoursMap = {};
       allHours.rows.forEach(h => { hoursMap[h.work_date.toISOString().split('T')[0]] = parseFloat(h.hours_worked); });
       let totalHours = 0;
