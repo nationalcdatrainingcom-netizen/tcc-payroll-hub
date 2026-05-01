@@ -229,6 +229,17 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded_by VARCHAR(200)`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded_at TIMESTAMP`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_employees_updated INTEGER DEFAULT 0`);
+  // Store per-period QB PTO imports so re-uploading replaces instead of accumulates
+  await pool.query(`CREATE TABLE IF NOT EXISTS qb_pto_imports (
+    id SERIAL PRIMARY KEY,
+    employee_id INTEGER REFERENCES employees(id),
+    period_start DATE NOT NULL,
+    period_end DATE NOT NULL,
+    hours NUMERIC(8,2) DEFAULT 0,
+    pay_types TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(employee_id, period_start, period_end)
+  )`);
   // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
   // Ensure original daily_hours constraint exists
@@ -871,6 +882,22 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     
     let matched = 0;
     const results = [];
+    const currentPP = getPayPeriod(new Date());
+    
+    // Step 1: Undo any previous QB import for this period
+    // Subtract previously imported hours from each employee's pto_hours_used_qb
+    const prevImports = await pool.query(
+      `SELECT employee_id, hours FROM qb_pto_imports WHERE period_start = $1 AND period_end = $2`,
+      [currentPP.start, currentPP.end]);
+    for (const prev of prevImports.rows) {
+      await pool.query(
+        `UPDATE employees SET pto_hours_used_qb = GREATEST(0, COALESCE(pto_hours_used_qb, 0) - $1) WHERE id = $2`,
+        [parseFloat(prev.hours), prev.employee_id]);
+    }
+    // Clear the old import records for this period
+    await pool.query(`DELETE FROM qb_pto_imports WHERE period_start = $1 AND period_end = $2`, [currentPP.start, currentPP.end]);
+    
+    // Step 2: Apply new imports
     for (const [name, info] of Object.entries(ptoPaid)) {
       const hours = info.hours;
       const parts = name.split(',').map(s => s.trim());
@@ -883,6 +910,11 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
         const e = emp.rows[0];
         const newTotal = parseFloat(e.pto_hours_used_qb || 0) + hours;
         await pool.query('UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2', [newTotal, e.id]);
+        // Record this import so it can be undone if re-uploaded
+        await pool.query(
+          `INSERT INTO qb_pto_imports (employee_id, period_start, period_end, hours, pay_types) VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (employee_id, period_start, period_end) DO UPDATE SET hours = $4, pay_types = $5`,
+          [e.id, currentPP.start, currentPP.end, hours, info.types.map(t => t.type).join(', ')]);
         results.push({ name: `${e.last_name}, ${e.first_name}`, hours, types: info.types, newTotal });
         matched++;
       } else { results.push({ name, hours, types: info.types, newTotal: null, error: 'Not found' }); }
@@ -1568,6 +1600,19 @@ app.get('/api/upload-log', requireRole('owner', 'payroll', 'hr'), async (req, re
     }
     const result = await pool.query(query, params);
     res.json(result.rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// Admin: reset all QB PTO hours (owner only) — use when QB upload has been run multiple times
+app.post('/api/admin/reset-qb-pto', requireRole('owner'), async (req, res) => {
+  try {
+    // Reset all employees' pto_hours_used_qb to 0
+    const result = await pool.query(`UPDATE employees SET pto_hours_used_qb = 0 WHERE pto_hours_used_qb > 0`);
+    // Clear all QB import records
+    await pool.query(`DELETE FROM qb_pto_imports`);
+    // Reset QB uploaded flags
+    await pool.query(`UPDATE payroll_periods SET qb_uploaded = FALSE, qb_uploaded_by = NULL, qb_uploaded_at = NULL, qb_employees_updated = 0`);
+    res.json({ ok: true, employeesReset: result.rowCount, message: 'All QB PTO hours reset to 0. Re-upload the QB report to set correct values.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
