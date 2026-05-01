@@ -2652,7 +2652,7 @@ async function renderPayroll() {
     
     // Close out button for Jared
     if (!pp.payroll_closed) {
-      const allDone = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.timecards_uploaded && periods[c]?.timeoff_submitted);
+      const allDone = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.timecards_uploaded && (periods[c]?.timeoff_submitted || periods[c]?.timeoff_approved));
       const hasPendingPI = pendingIncreases.length > 0;
       html += `<div class="card"><div class="card-header"><h3>Step 4: Process Payroll</h3></div><div class="card-body">`;
       if (allDone && !hasPendingPI) {
@@ -2663,7 +2663,7 @@ async function renderPayroll() {
         </div>`;
       } else {
         const blockers = [];
-        const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.timecards_uploaded || !periods[c]?.timeoff_submitted);
+        const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.timecards_uploaded || (!periods[c]?.timeoff_submitted && !periods[c]?.timeoff_approved));
         if (waiting.length > 0) {
           const details = waiting.map(c => {
             const p = periods[c] || {};
