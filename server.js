@@ -796,6 +796,7 @@ app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'
 // QuickBooks payroll summary upload
 app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
   try {
+    console.log('[QB IMPORT] req.body:', JSON.stringify(req.body));
     const XLSX = require('xlsx');
     const wb = XLSX.readFile(req.file.path);
     fs.unlinkSync(req.file.path); // clean up temp file
@@ -882,9 +883,10 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     
     let matched = 0;
     const results = [];
-    const currentPP = getPayPeriod(new Date());
-    
-    // Step 1: Undo any previous QB import for this period
+    const currentPP = (req.body?.period_start && req.body?.period_end)
+      ? { start: req.body.period_start, end: req.body.period_end }
+      : getPayPeriod(new Date());
+    console.log('[QB IMPORT] Using period:', currentPP.start, 'to', currentPP.end);
     // Subtract previously imported hours from each employee's pto_hours_used_qb
     const prevImports = await pool.query(
       `SELECT employee_id, hours FROM qb_pto_imports WHERE period_start = $1 AND period_end = $2`,
@@ -929,11 +931,9 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       );
     } catch(logErr) { console.error('Upload log error:', logErr.message); }
     
-    // Mark QB as uploaded for the current pay period (all centers)
+    // Mark QB as uploaded for this pay period (all centers)
     if (matched > 0) {
-      const currentPP = getPayPeriod(new Date());
       try {
-        // Update all center records for this period
         await pool.query(
           `UPDATE payroll_periods SET qb_uploaded = TRUE, qb_uploaded_by = $1, qb_uploaded_at = NOW(), qb_employees_updated = $2
            WHERE period_start = $3 AND period_end = $4`,
