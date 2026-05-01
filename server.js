@@ -224,6 +224,11 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
+  // QB upload tracking
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded BOOLEAN DEFAULT FALSE`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded_by VARCHAR(200)`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded_at TIMESTAMP`);
+  await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_employees_updated INTEGER DEFAULT 0`);
   // payroll_center: which center's payroll report this employee belongs to (may differ from staffing plan center)
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS payroll_center VARCHAR(100)`);
   // Ensure original daily_hours constraint exists
@@ -891,6 +896,19 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
          JSON.stringify({ dateRange, parseLog: parseLog.slice(0, 30), totalPTOEmployees: Object.keys(ptoPaid).length })]
       );
     } catch(logErr) { console.error('Upload log error:', logErr.message); }
+    
+    // Mark QB as uploaded for the current pay period (all centers)
+    if (matched > 0) {
+      const currentPP = getPayPeriod(new Date());
+      try {
+        // Update all center records for this period
+        await pool.query(
+          `UPDATE payroll_periods SET qb_uploaded = TRUE, qb_uploaded_by = $1, qb_uploaded_at = NOW(), qb_employees_updated = $2
+           WHERE period_start = $3 AND period_end = $4`,
+          [req.session.user.full_name, matched, currentPP.start, currentPP.end]
+        );
+      } catch(e) { console.error('QB status update error:', e.message); }
+    }
     
     res.json({ 
       dateRange, totalEmployeesWithPTO: Object.keys(ptoPaid).length, matched, results,
