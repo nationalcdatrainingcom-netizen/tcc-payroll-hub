@@ -781,7 +781,8 @@ app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'
 app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
   try {
     const XLSX = require('xlsx');
-    const wb = XLSX.read(req.file.buffer);
+    const wb = XLSX.readFile(req.file.path);
+    fs.unlinkSync(req.file.path); // clean up temp file
     const ws = wb.Sheets[wb.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
     
@@ -822,12 +823,17 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
         dateRange = col0;
       }
       
-      // Detect employee name: "Last, First" pattern where next column says Gross or is empty
+      // Reset currentName on blank rows or "Total" summary row
+      if ((!col0 && !col1) || col0 === 'Total') {
+        currentName = null;
+        continue;
+      }
+      
+      // Detect employee name: "Last, First" pattern where next column says Gross
       if (col0 && col0.includes(',') && !col0.startsWith('From') && !col0.startsWith('Total')) {
-        // Could be a name if followed by Gross or if it looks like "LastName, FirstName"
         const nameParts = col0.split(',');
         if (nameParts.length >= 2 && nameParts[0].trim().length > 0 && nameParts[1].trim().length > 0) {
-          if (col1 === 'Gross' || col1 === '' || col1 === 'Total') {
+          if (col1 === 'Gross') {
             currentName = col0;
             parseLog.push({ row: i, action: 'name', name: currentName });
             continue;
@@ -842,7 +848,8 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
           payType.includes('tax') || payType.includes('deduction') || 
           payType.includes('deposit') || payType.includes('insurance') ||
           payType.includes('contribution') || payType.includes('garnish') ||
-          payType.includes('withhold') || payType.includes('reimburs');
+          payType.includes('withhold') || payType.includes('reimburs') ||
+          payType.includes('tracking');
         
         if (!isSkipType && (col2 > 0 || col3 > 0)) {
           const hours = col2 > 0 ? col2 : col3;
