@@ -2562,8 +2562,8 @@ async function renderPayroll() {
         <div style="font-size:11px;font-weight:700;margin-top:4px">Payroll Processed</div>
         ${pp.payroll_closed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.payroll_closed_by}</div>` : ''}
       </div>
-      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.qb_uploaded?'var(--success-bg)':'var(--gray-100)'}">
-        <div style="font-size:20px">${pp.qb_uploaded?'✅':'4️⃣'}</div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.qb_uploaded || ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded)?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.qb_uploaded || ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded)?'✅':'4️⃣'}</div>
         <div style="font-size:11px;font-weight:700;margin-top:4px">QB Summary</div>
         ${pp.qb_uploaded_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.qb_uploaded_by}</div>` : ''}
         ${pp.qb_uploaded_at ? `<div style="font-size:10px;color:var(--gray-400);margin-top:1px">${new Date(pp.qb_uploaded_at).toLocaleDateString()}</div>` : ''}
@@ -2676,23 +2676,35 @@ async function renderPayroll() {
         }
         if (hasPendingPI) blockers.push(`🚫 ${pendingIncreases.length} pending pay increase request(s) must be resolved first`);
         html += blockers.map(b => `<p style="font-size:13px;color:var(--warning);margin-bottom:8px">${b}</p>`).join('');
+        // Allow owner/payroll to override and close anyway
+        if (isPayroll) {
+          html += `<div style="margin-top:16px;padding:16px;border:2px solid var(--danger);border-radius:8px;background:rgba(192,57,43,0.03)">
+            <p style="font-size:12px;color:var(--danger);margin-bottom:8px"><strong>Override:</strong> Close payroll even though some steps are incomplete. Use only when you've verified the data is correct.</p>
+            <div class="form-group"><label>Type your full name to sign</label><input id="payrollCloseSign" placeholder="Full name"></div>
+            <button class="btn btn-outline btn-sm" onclick="closePayroll()" style="color:var(--danger);border-color:var(--danger)">Close Payroll (Override)</button>
+          </div>`;
+        }
       }
       html += `</div></div>`;
     }
   }
   
   // ---- QuickBooks Payroll Summary Upload (Step 5) ----
+  // Show ONCE (not per center) since the QB report covers all locations
   if (isPayroll) {
-    const qbDone = pp.qb_uploaded;
+    // Check if ANY center has qb_uploaded set
+    const anyQbDone = ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded);
+    const qbInfo = ['Peace Boulevard','Niles','Montessori'].map(c => periods[c]).find(p => p?.qb_uploaded) || {};
+    
     html += `<div class="card" style="margin-top:20px"><div class="card-header"><h3>Step 5: Upload QuickBooks Payroll Summary</h3>
-      ${qbDone ? '<span class="badge badge-success">Complete</span>' : ''}
+      ${anyQbDone ? '<span class="badge badge-success">Complete</span>' : ''}
     </div>
       <div class="card-body">`;
     
-    if (qbDone) {
+    if (anyQbDone) {
       html += `<div style="background:var(--success-bg);border:1px solid var(--success);border-radius:8px;padding:14px;margin-bottom:16px">
         <div style="font-weight:700;color:var(--success);margin-bottom:4px">✅ QuickBooks Summary Uploaded</div>
-        <div style="font-size:12px;color:var(--gray-600)">Uploaded by ${pp.qb_uploaded_by || 'Unknown'} on ${pp.qb_uploaded_at ? new Date(pp.qb_uploaded_at).toLocaleDateString() : ''}. ${pp.qb_employees_updated || 0} employees' PTO hours updated.</div>
+        <div style="font-size:12px;color:var(--gray-600)">Uploaded by ${qbInfo.qb_uploaded_by || 'Unknown'} on ${qbInfo.qb_uploaded_at ? new Date(qbInfo.qb_uploaded_at).toLocaleDateString() : ''}. ${qbInfo.qb_employees_updated || 0} employees' PTO hours updated.</div>
       </div>
       <details style="margin-bottom:12px"><summary style="cursor:pointer;font-size:12px;color:var(--info);font-weight:600">Re-upload (replace previous)</summary>
         <div style="margin-top:12px">`;
@@ -2713,23 +2725,24 @@ async function renderPayroll() {
         <button class="btn btn-primary" onclick="uploadQBPayroll()">Upload QuickBooks Report</button>
         <div id="qbUploadResult" style="margin-top:12px"></div>`;
     
-    if (qbDone) {
+    if (anyQbDone) {
       html += `</div></details>`;
     }
     
     html += `</div></div>`;
     
     // ---- Period Complete Status ----
-    if (pp.payroll_closed && pp.qb_uploaded) {
+    const allPayrollClosed = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.payroll_closed);
+    if (allPayrollClosed && anyQbDone) {
       html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--success)"><div class="card-body" style="text-align:center;padding:24px">
         <div style="font-size:24px;margin-bottom:8px">✅</div>
         <div style="font-size:16px;font-weight:700;color:var(--success);margin-bottom:4px">Payroll Period Complete</div>
         <div style="font-size:13px;color:var(--gray-600)">
           Payroll closed by ${pp.payroll_closed_by || ''} on ${pp.payroll_closed_at ? new Date(pp.payroll_closed_at).toLocaleDateString() : ''}<br>
-          QB Summary uploaded by ${pp.qb_uploaded_by || ''} on ${pp.qb_uploaded_at ? new Date(pp.qb_uploaded_at).toLocaleDateString() : ''}
+          QB Summary uploaded by ${qbInfo.qb_uploaded_by || ''} on ${qbInfo.qb_uploaded_at ? new Date(qbInfo.qb_uploaded_at).toLocaleDateString() : ''}
         </div>
       </div></div>`;
-    } else if (pp.payroll_closed && !pp.qb_uploaded) {
+    } else if (allPayrollClosed && !anyQbDone) {
       html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--warning)"><div class="card-body">
         <div style="font-size:14px;font-weight:700;color:var(--warning);margin-bottom:4px">⚠️ Payroll Closed — QB Summary Still Needed</div>
         <div style="font-size:13px;color:var(--gray-600)">Upload the QuickBooks Payroll Summary above to update PTO balances and complete this period.</div>
