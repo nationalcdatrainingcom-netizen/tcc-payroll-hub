@@ -2719,6 +2719,24 @@ async function renderPayroll() {
     
     html += `</div></div>`;
     
+    // ---- Period Complete Status ----
+    if (pp.payroll_closed && pp.qb_uploaded) {
+      html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--success)"><div class="card-body" style="text-align:center;padding:24px">
+        <div style="font-size:24px;margin-bottom:8px">✅</div>
+        <div style="font-size:16px;font-weight:700;color:var(--success);margin-bottom:4px">Payroll Period Complete</div>
+        <div style="font-size:13px;color:var(--gray-600)">
+          Payroll closed by ${pp.payroll_closed_by || ''} on ${pp.payroll_closed_at ? new Date(pp.payroll_closed_at).toLocaleDateString() : ''}<br>
+          QB Summary uploaded by ${pp.qb_uploaded_by || ''} on ${pp.qb_uploaded_at ? new Date(pp.qb_uploaded_at).toLocaleDateString() : ''}
+        </div>
+      </div></div>`;
+    } else if (pp.payroll_closed && !pp.qb_uploaded) {
+      html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--warning)"><div class="card-body">
+        <div style="font-size:14px;font-weight:700;color:var(--warning);margin-bottom:4px">⚠️ Payroll Closed — QB Summary Still Needed</div>
+        <div style="font-size:13px;color:var(--gray-600)">Upload the QuickBooks Payroll Summary above to update PTO balances and complete this period.</div>
+      </div></div>`;
+    }
+  }
+    
     // ---- Pending Time Off Change Requests ----
     try {
       const changeReqs = await api('/api/timeoff-change-requests');
