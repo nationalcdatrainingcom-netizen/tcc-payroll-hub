@@ -2892,6 +2892,8 @@ async function uploadQBPayroll() {
   
   const formData = new FormData();
   formData.append('file', fileInput.files[0]);
+  formData.append('period_start', payPeriod.start);
+  formData.append('period_end', payPeriod.end);
   
   resultDiv.innerHTML = '<em>Processing QuickBooks report...</em>';
   try {
