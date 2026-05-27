@@ -224,6 +224,10 @@ async function initDB() {
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_pending BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS change_request_reason TEXT`);
   await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS pto_hours_used_qb NUMERIC(8,2) DEFAULT 0`);
+  // YTD hours worked from QB Payroll Summary (overrides daily_hours for PTO accrual when set)
+  // NULL = no QB upload yet; fall back to daily_hours sum. Numeric value = YTD Regular+OT+Salary from last upload.
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS ytd_hours_worked_qb NUMERIC(8,2) DEFAULT NULL`);
+  await pool.query(`ALTER TABLE employees ADD COLUMN IF NOT EXISTS ytd_qb_uploaded_at TIMESTAMP`);
   // QB upload tracking
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded BOOLEAN DEFAULT FALSE`);
   await pool.query(`ALTER TABLE payroll_periods ADD COLUMN IF NOT EXISTS qb_uploaded_by VARCHAR(200)`);
@@ -385,11 +389,26 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const currentYear = new Date().getFullYear();
   const tenure = getTenureBonusDays(yearHired, isFullTime, isAdmin, weeklyHours);
   const hoursPerDay = tenure.hoursPerDay;
-  const hoursResult = await pool.query(
-    `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
-    [empId, currentYear]
+  // PRIMARY SOURCE: YTD hours worked from the most recent QB Payroll Summary upload.
+  // FALLBACK: sum of daily_hours from Playground timecards (for employees not yet imported via QB).
+  // This lets QB upload override daily_hours without touching the daily_hours table or any other logic.
+  const qbHoursRow = await pool.query(
+    `SELECT ytd_hours_worked_qb FROM employees WHERE id = $1`, [empId]
   );
-  const totalHoursWorked = parseFloat(hoursResult.rows[0].total_hours);
+  const qbYtdHours = qbHoursRow.rows[0]?.ytd_hours_worked_qb;
+  let totalHoursWorked;
+  let hoursWorkedSource;
+  if (qbYtdHours !== null && qbYtdHours !== undefined) {
+    totalHoursWorked = parseFloat(qbYtdHours);
+    hoursWorkedSource = 'qb';
+  } else {
+    const hoursResult = await pool.query(
+      `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
+      [empId, currentYear]
+    );
+    totalHoursWorked = parseFloat(hoursResult.rows[0].total_hours);
+    hoursWorkedSource = 'daily_hours';
+  }
   const rawAccruedHours = totalHoursWorked / 20;
   const accruedHours = Math.min(rawAccruedHours, 80);
   const tenureBonusHours = tenure.additionalHours;
@@ -425,6 +444,7 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const unpaidLast6Months = parseInt(unpaidResult.rows[0].count);
   return {
     totalHoursWorked: Math.round(totalHoursWorked * 100) / 100,
+    hoursWorkedSource,
     accruedHours: Math.round(accruedHours * 100) / 100,
     accruedDays: Math.round((accruedHours / hoursPerDay) * 100) / 100,
     accrualRate: '1hr per 20hrs worked', accrualCap: 80,
@@ -796,142 +816,282 @@ app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'
 // QuickBooks payroll summary upload
 app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
   try {
-    console.log('[QB IMPORT] req.body:', JSON.stringify(req.body));
+    console.log('[QB IMPORT YTD] req.body:', JSON.stringify(req.body));
     const XLSX = require('xlsx');
     const wb = XLSX.readFile(req.file.path);
     fs.unlinkSync(req.file.path); // clean up temp file
     const ws = wb.Sheets[wb.SheetNames[0]];
     const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
-    
-    // Debug: capture what was actually read
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // YTD PAYROLL SUMMARY PARSER  (replaces previous per-period parser)
+    //
+    // The QB "Payroll Summary by Employee" report is TRANSPOSED:
+    //   Row 0-3 : header / company / date range
+    //   Row N   : "Item" + employee names ("Last First [Middle]") starting at column 2
+    //             ("Total" is column 1 — that's the company-wide total, skipped)
+    //   Row N+1+: pay-type rows. Column 0 = label, column 1 = grand total, columns 2+ = per-employee values.
+    //
+    // The report represents YEAR-TO-DATE totals. Each upload REPLACES the YTD
+    // figures for hours worked and PTO used (it does not add to them).
+    //
+    // Pay-type categorization:
+    //   HOURS WORKED YTD = "Hours - Regular Pay" + "Hours - Overtime Pay" + "Hours - Salary"
+    //   PTO USED YTD     = every other "Hours - ..." row (Sick, Holiday, Paid time off, etc.)
+    //   SKIPPED          = "Hours - Bonus", "Hours - total", any "Other pay - ..." row,
+    //                      and any row that is not prefixed "Hours - " (those are dollars).
+    //
+    // Salaried staff (anyone with "Hours - Salary" > 0): hours worked IS recorded,
+    // but PTO USED IS NOT TOUCHED — per Mary's rule that salaried staff PTO is not
+    // tracked through this report.
+    //
+    // Only `ytd_hours_worked_qb` and `pto_hours_used_qb` are modified. The
+    // calculateActualPTO function reads `ytd_hours_worked_qb` and uses it for
+    // accrual (÷20) when set; otherwise it falls back to the daily_hours sum.
+    // Every other calculation (tenure bonus, carryover, crossover, accrual cap,
+    // remaining balance) is unchanged.
+    // ──────────────────────────────────────────────────────────────────────────
+
     const debugInfo = {
       sheetNames: wb.SheetNames,
       totalRows: data.length,
-      sampleRows: data.slice(0, 15).map((r, i) => ({ row: i, cols: r.slice(0, 6) })),
+      sampleRows: data.slice(0, 20).map((r, i) => ({ row: i, cols: (r || []).slice(0, 5) })),
       filename: req.file?.originalname || 'unknown'
     };
-    
-    // Types to skip — these are regular payroll, not PTO
-    const skipTypes = new Set([
-      'Gross','Regular Pay','Overtime Pay','Adjusted gross','Pretax deductions',
-      'Health Insurance','Salary','Bonus','Net Pay','Total','Check Amount',
-      'Tax','Federal','State','Social Security','Medicare',
-      'Employee Tax','Employer Tax','Deduction','Contribution','Reimbursement',
-      'Direct Deposit','Wage','Hourly','',
-      // Common lowercase/variations
-      'gross','regular pay','overtime pay','salary','bonus','net pay'
-    ]);
-    
-    let currentName = null;
-    const ptoPaid = {};
+
+    // Locate the "Item" header row and the report date range
+    let nameRowIdx = -1;
     let dateRange = '';
-    const parseLog = []; // track what we found for debugging
-    
-    for (let i = 0; i < data.length; i++) {
-      const row = data[i];
-      if (!row || row.length === 0) continue;
+    for (let i = 0; i < Math.min(data.length, 20); i++) {
+      const row = data[i] || [];
       const col0 = String(row[0] || '').trim();
-      const col1 = String(row[1] || '').trim();
-      const col2 = parseFloat(row[2]) || 0;
-      const col3 = parseFloat(row[3]) || 0;
-      
-      // Detect date range (various QB formats)
-      if (col0.startsWith('From ') || col0.match(/\d{1,2}\/\d{1,2}\/\d{2,4}\s*(to|-|through)\s*\d{1,2}\/\d{1,2}\/\d{2,4}/i)) {
+      if (!dateRange && (col0.startsWith('From ') ||
+          /\d{1,2}\/\d{1,2}\/\d{2,4}\s*(to|-|through)/i.test(col0) ||
+          /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.+\d{4}/i.test(col0))) {
         dateRange = col0;
       }
-      
-      // Reset currentName on blank rows or "Total" summary row
-      if ((!col0 && !col1) || col0 === 'Total') {
-        currentName = null;
+      if (col0 === 'Item' && row.length > 5) {
+        nameRowIdx = i;
+        break;
+      }
+    }
+
+    if (nameRowIdx === -1) {
+      return res.status(400).json({
+        error: 'Could not find employee header row. Expected a row starting with "Item" followed by employee names. Please confirm this is a QuickBooks "Payroll summary by employee" report exported as .xlsx/.xls.',
+        debug: debugInfo
+      });
+    }
+
+    // Build per-column employee list from the header row.
+    // Column 0 = "Item" label, column 1 = "Total" company-wide column (skip), columns 2+ = employees.
+    const empCols = [];
+    const nameRow = data[nameRowIdx];
+    for (let c = 2; c < nameRow.length; c++) {
+      const raw = String(nameRow[c] || '').trim();
+      if (!raw) continue;
+      // Strip leading asterisk (terminated-employee marker) and collapse whitespace
+      const cleaned = raw.replace(/^\*+/, '').replace(/\s+/g, ' ').trim();
+      if (!cleaned) continue;
+      empCols.push({
+        col: c,
+        rawName: raw,
+        cleanName: cleaned,
+        ytd: { worked: 0, pto: 0, isSalaried: false, payTypes: [] }
+      });
+    }
+
+    // Pay-type categorization
+    const HOURS_PREFIX_RE = /^Hours\s*-\s*(.+)$/i;
+    const WORKED_TYPES = new Set(['regular pay', 'overtime pay', 'salary']);
+    const SKIP_TYPES = new Set(['bonus', 'total']);
+    // Anything else under "Hours - " is treated as PTO used.
+
+    const parseLog = [];
+
+    // Walk pay-type rows after the header row
+    for (let i = nameRowIdx + 1; i < data.length; i++) {
+      const row = data[i] || [];
+      const label = String(row[0] || '').trim();
+      if (!label) continue;
+
+      const m = label.match(HOURS_PREFIX_RE);
+      if (!m) {
+        // Not a "Hours - ..." row — skip silently (Other pay rows, dollar rows, blank rows)
         continue;
       }
-      
-      // Detect employee name: "Last, First" pattern where next column says Gross
-      if (col0 && col0.includes(',') && !col0.startsWith('From') && !col0.startsWith('Total')) {
-        const nameParts = col0.split(',');
-        if (nameParts.length >= 2 && nameParts[0].trim().length > 0 && nameParts[1].trim().length > 0) {
-          if (col1 === 'Gross') {
-            currentName = col0;
-            parseLog.push({ row: i, action: 'name', name: currentName });
-            continue;
-          }
-        }
-      }
-      
-      // If we have a current employee, check for PTO-type pay items
-      if (currentName && col1) {
-        const payType = col1.toLowerCase();
-        const isSkipType = skipTypes.has(col1) || skipTypes.has(payType) || 
-          payType.includes('tax') || payType.includes('deduction') || 
-          payType.includes('deposit') || payType.includes('insurance') ||
-          payType.includes('contribution') || payType.includes('garnish') ||
-          payType.includes('withhold') || payType.includes('reimburs') ||
-          payType.includes('tracking');
-        
-        if (!isSkipType && (col2 > 0 || col3 > 0)) {
-          const hours = col2 > 0 ? col2 : col3;
-          if (!ptoPaid[currentName]) ptoPaid[currentName] = { hours: 0, types: [] };
-          ptoPaid[currentName].hours += hours;
-          ptoPaid[currentName].types.push({ type: col1, hours });
-          parseLog.push({ row: i, action: 'pto', name: currentName, type: col1, hours });
+
+      const subtype = m[1].toLowerCase().trim();
+      let category;
+      if (SKIP_TYPES.has(subtype)) category = 'skip';
+      else if (WORKED_TYPES.has(subtype)) category = 'worked';
+      else category = 'pto';
+
+      parseLog.push({ row: i, label, subtype, category });
+      if (category === 'skip') continue;
+
+      // Distribute this row's values across employee columns
+      for (const ec of empCols) {
+        const v = parseFloat(row[ec.col]);
+        if (!v || isNaN(v) || v <= 0) continue;
+        if (category === 'worked') {
+          ec.ytd.worked += v;
+          ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'worked' });
+          if (subtype === 'salary') ec.ytd.isSalaried = true;
+        } else {
+          ec.ytd.pto += v;
+          ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'pto' });
         }
       }
     }
-    
-    // Sanity check: remove anyone with >200 hours (probably misparse)
-    for (const name of Object.keys(ptoPaid)) { if (ptoPaid[name].hours > 200) delete ptoPaid[name]; }
-    
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // NAME MATCHING against the active employees roster.
+    // The report uses "Last First [Middle/Suffix]" with no comma. We try several
+    // token-split points and fall back to fuzzy strategies.
+    // ──────────────────────────────────────────────────────────────────────────
+
+    const allActiveResult = await pool.query(
+      `SELECT id, first_name, last_name, center FROM employees WHERE is_active = TRUE`
+    );
+    const allEmployees = allActiveResult.rows.map(e => ({
+      id: e.id,
+      firstName: e.first_name,
+      lastName: e.last_name,
+      center: e.center,
+      firstLc: (e.first_name || '').toLowerCase().trim(),
+      lastLc: (e.last_name || '').toLowerCase().trim()
+    }));
+
+    function matchEmployee(cleanName) {
+      // Normalize: lowercase, collapse whitespace, strip trailing single-letter middle initial
+      let norm = cleanName.toLowerCase().replace(/\s+/g, ' ').trim();
+      norm = norm.replace(/\s+[a-z]$/i, '').trim();
+      const tokens = norm.split(' ').filter(Boolean);
+      if (tokens.length < 2) return null;
+
+      // Build candidate (last, first) splits from the right (greediest last-name first)
+      const candidates = [];
+      for (let k = tokens.length - 1; k >= 1; k--) {
+        candidates.push({
+          last: tokens.slice(0, k).join(' '),
+          first: tokens.slice(k).join(' ')
+        });
+      }
+
+      // Strategy 1: exact last + exact first (or first-word of first)
+      for (const c of candidates) {
+        const firstFirst = c.first.split(' ')[0];
+        const exact = allEmployees.find(e => e.lastLc === c.last && e.firstLc === c.first);
+        if (exact) return exact;
+        const firstWord = allEmployees.find(e => e.lastLc === c.last && e.firstLc === firstFirst);
+        if (firstWord) return firstWord;
+        const prefix = allEmployees.find(e => e.lastLc === c.last &&
+          (e.firstLc.startsWith(firstFirst) || firstFirst.startsWith(e.firstLc)));
+        if (prefix) return prefix;
+      }
+
+      // Strategy 2: hyphen-insensitive (handles "Bell Bowman" vs "Bell-Bowman", etc.)
+      for (const c of candidates) {
+        const lastNoHyphen = c.last.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+        const lastCompact = c.last.replace(/[-\s]/g, '');
+        const firstFirst = c.first.split(' ')[0];
+        const h1 = allEmployees.find(e => {
+          const elNoHy = e.lastLc.replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+          return elNoHy === lastNoHyphen && (e.firstLc === c.first || e.firstLc === firstFirst);
+        });
+        if (h1) return h1;
+        const h2 = allEmployees.find(e => {
+          const elCompact = e.lastLc.replace(/[-\s]/g, '');
+          return elCompact === lastCompact && (e.firstLc === c.first || e.firstLc === firstFirst);
+        });
+        if (h2) return h2;
+      }
+
+      // Strategy 3: token-set containment — every DB token appears among report tokens
+      for (const e of allEmployees) {
+        const dbTokens = (e.lastLc + ' ' + e.firstLc).split(/[\s-]+/).filter(Boolean);
+        if (dbTokens.length < 2) continue;
+        const allPresent = dbTokens.every(t => tokens.includes(t));
+        if (allPresent) return e;
+      }
+
+      return null;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Apply YTD values to the database
+    //   - ytd_hours_worked_qb : REPLACED with new YTD worked total (Reg + OT + Salary)
+    //   - pto_hours_used_qb   : REPLACED with new YTD PTO total (unless salaried)
+    // No additions, no subtractions, no per-period accumulation.
+    // ──────────────────────────────────────────────────────────────────────────
+
     let matched = 0;
+    let salariedSkippedPto = 0;
     const results = [];
+    const unmatched = [];
+    const now = new Date();
+
+    for (const ec of empCols) {
+      const emp = matchEmployee(ec.cleanName);
+      const workedHrs = Math.round(ec.ytd.worked * 100) / 100;
+      const ptoHrs = Math.round(ec.ytd.pto * 100) / 100;
+
+      if (!emp) {
+        // Only flag as unmatched if the report actually has hours for this column
+        if (workedHrs > 0 || ptoHrs > 0) {
+          unmatched.push({ name: ec.rawName, worked: workedHrs, pto: ptoHrs });
+          results.push({
+            name: ec.rawName,
+            hours: ptoHrs,
+            hoursWorked: workedHrs,
+            types: ec.ytd.payTypes,
+            newTotal: null,
+            error: 'Not found in active roster'
+          });
+        }
+        continue;
+      }
+
+      // Always update YTD hours worked (Regular + OT + Salary)
+      await pool.query(
+        `UPDATE employees SET ytd_hours_worked_qb = $1, ytd_qb_uploaded_at = $2 WHERE id = $3`,
+        [workedHrs, now, emp.id]
+      );
+
+      // Update PTO used YTD only for non-salaried staff
+      let ptoSkipReason = null;
+      if (ec.ytd.isSalaried) {
+        ptoSkipReason = 'salaried';
+        salariedSkippedPto++;
+      } else {
+        await pool.query(
+          `UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2`,
+          [ptoHrs, emp.id]
+        );
+      }
+
+      results.push({
+        name: `${emp.lastName}, ${emp.firstName}`,
+        rawName: ec.rawName,
+        hours: ptoHrs,                  // YTD PTO used (matches existing "PTO This Period" column)
+        hoursWorked: workedHrs,         // YTD hours worked (Reg + OT + Salary)
+        isSalaried: ec.ytd.isSalaried,
+        ptoSkipped: ptoSkipReason,
+        types: ec.ytd.payTypes,
+        newTotal: ptoHrs                // YTD PTO total stored (matches existing "New YTD Total" column)
+      });
+      matched++;
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Mark the current pay period as having a QB upload (drives the UI banner)
+    // ──────────────────────────────────────────────────────────────────────────
     const currentPP = (req.body?.period_start && req.body?.period_end)
       ? { start: req.body.period_start, end: req.body.period_end }
       : getPayPeriod(new Date());
-    console.log('[QB IMPORT] Using period:', currentPP.start, 'to', currentPP.end);
-    // Subtract previously imported hours from each employee's pto_hours_used_qb
-    const prevImports = await pool.query(
-      `SELECT employee_id, hours FROM qb_pto_imports WHERE period_start = $1 AND period_end = $2`,
-      [currentPP.start, currentPP.end]);
-    for (const prev of prevImports.rows) {
-      await pool.query(
-        `UPDATE employees SET pto_hours_used_qb = GREATEST(0, COALESCE(pto_hours_used_qb, 0) - $1) WHERE id = $2`,
-        [parseFloat(prev.hours), prev.employee_id]);
-    }
-    // Clear the old import records for this period
-    await pool.query(`DELETE FROM qb_pto_imports WHERE period_start = $1 AND period_end = $2`, [currentPP.start, currentPP.end]);
-    
-    // Step 2: Apply new imports
-    for (const [name, info] of Object.entries(ptoPaid)) {
-      const hours = info.hours;
-      const parts = name.split(',').map(s => s.trim());
-      if (parts.length < 2) continue;
-      const last = parts[0]; const first = parts[1].split(' ')[0];
-      const emp = await pool.query(
-        `SELECT id, first_name, last_name, pto_hours_used_qb FROM employees WHERE (LOWER(last_name) = LOWER($1) OR LOWER($1) LIKE '%' || LOWER(last_name) || '%') AND LOWER(first_name) LIKE LOWER($2) || '%' AND is_active = TRUE LIMIT 1`,
-        [last, first]);
-      if (emp.rows.length > 0) {
-        const e = emp.rows[0];
-        const newTotal = parseFloat(e.pto_hours_used_qb || 0) + hours;
-        await pool.query('UPDATE employees SET pto_hours_used_qb = $1 WHERE id = $2', [newTotal, e.id]);
-        // Record this import so it can be undone if re-uploaded
-        await pool.query(
-          `INSERT INTO qb_pto_imports (employee_id, period_start, period_end, hours, pay_types) VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (employee_id, period_start, period_end) DO UPDATE SET hours = $4, pay_types = $5`,
-          [e.id, currentPP.start, currentPP.end, hours, info.types.map(t => t.type).join(', ')]);
-        results.push({ name: `${e.last_name}, ${e.first_name}`, hours, types: info.types, newTotal });
-        matched++;
-      } else { results.push({ name, hours, types: info.types, newTotal: null, error: 'Not found' }); }
-    }
-    // Log the upload
-    try {
-      await pool.query(
-        `INSERT INTO upload_log (center, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, notes)
-         VALUES ('All', 'qb-payroll', $1, $2, $3, $4, $5, $6)`,
-        [req.file?.originalname, req.session.user.full_name, req.session.user.id, data.length, matched,
-         JSON.stringify({ dateRange, parseLog: parseLog.slice(0, 30), totalPTOEmployees: Object.keys(ptoPaid).length })]
-      );
-    } catch(logErr) { console.error('Upload log error:', logErr.message); }
-    
-    // Mark QB as uploaded for this pay period (all centers)
+    console.log('[QB IMPORT YTD] Marking period:', currentPP.start, 'to', currentPP.end);
+
     if (matched > 0) {
       try {
         await pool.query(
@@ -939,14 +1099,43 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
            WHERE period_start = $3 AND period_end = $4`,
           [req.session.user.full_name, matched, currentPP.start, currentPP.end]
         );
-      } catch(e) { console.error('QB status update error:', e.message); }
+      } catch (e) { console.error('QB status update error:', e.message); }
     }
-    
-    res.json({ 
-      dateRange, totalEmployeesWithPTO: Object.keys(ptoPaid).length, matched, results,
-      debug: { totalRows: data.length, sampleRows: debugInfo.sampleRows, parseLog: parseLog.slice(0, 20) }
+
+    // Audit-log the upload
+    try {
+      await pool.query(
+        `INSERT INTO upload_log (center, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, notes)
+         VALUES ('All', 'qb-payroll-ytd', $1, $2, $3, $4, $5, $6)`,
+        [req.file?.originalname, req.session.user.full_name, req.session.user.id, data.length, matched,
+         JSON.stringify({
+           dateRange,
+           parseLog: parseLog.slice(0, 40),
+           totalEmployeeColumns: empCols.length,
+           unmatched: unmatched.slice(0, 20),
+           salariedSkippedPto
+         })]
+      );
+    } catch (logErr) { console.error('Upload log error:', logErr.message); }
+
+    res.json({
+      dateRange,
+      totalEmployeesWithPTO: results.filter(r => r.hours > 0 || r.hoursWorked > 0).length,
+      matched,
+      salariedSkippedPto,
+      results,
+      debug: {
+        totalRows: data.length,
+        sampleRows: debugInfo.sampleRows,
+        parseLog: parseLog.slice(0, 20),
+        employeeColumns: empCols.length,
+        unmatched
+      }
     });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    console.error('[QB IMPORT YTD] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // Pay increase requests
@@ -1608,11 +1797,13 @@ app.post('/api/admin/reset-qb-pto', requireRole('owner'), async (req, res) => {
   try {
     // Reset all employees' pto_hours_used_qb to 0
     const result = await pool.query(`UPDATE employees SET pto_hours_used_qb = 0 WHERE pto_hours_used_qb > 0`);
+    // Also clear YTD hours worked QB override (back to NULL so PTO accrual falls back to daily_hours)
+    await pool.query(`UPDATE employees SET ytd_hours_worked_qb = NULL, ytd_qb_uploaded_at = NULL WHERE ytd_hours_worked_qb IS NOT NULL`);
     // Clear all QB import records
     await pool.query(`DELETE FROM qb_pto_imports`);
     // Reset QB uploaded flags
     await pool.query(`UPDATE payroll_periods SET qb_uploaded = FALSE, qb_uploaded_by = NULL, qb_uploaded_at = NULL, qb_employees_updated = 0`);
-    res.json({ ok: true, employeesReset: result.rowCount, message: 'All QB PTO hours reset to 0. Re-upload the QB report to set correct values.' });
+    res.json({ ok: true, employeesReset: result.rowCount, message: 'All QB PTO hours and YTD hours worked reset. Re-upload the QB YTD report to set correct values.' });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
