@@ -2712,15 +2712,14 @@ async function renderPayroll() {
     
     html += `<div style="background:var(--gold-pale);border:1px solid var(--gold);border-radius:8px;padding:14px;margin-bottom:16px;font-size:12px;line-height:1.7;color:var(--gray-700)">
           <strong>Instructions:</strong><br>
-          1. In QuickBooks, go to <strong>Reports → Standard Reports → Payroll Summary by Employee</strong><br>
-          2. Select the <strong>last pay date</strong> for this period<br>
-          3. Click <strong>Customize</strong> → What to include: <strong>All Employees, All Locations</strong><br>
-          4. Group by <strong>Employee</strong>, select <strong>Totals and Details</strong><br>
-          5. Select <strong>Other Pay, Net Pay, and Hours</strong><br>
-          6. Click <strong>Run Report</strong>, then <strong>Apply Changes</strong><br>
-          7. <strong>Export to Excel</strong> and upload below
+          1. In QuickBooks, go to <strong>Reports → Payroll Summary by Employee</strong><br>
+          2. Set the date range from <strong>January 25</strong> to <strong>the date payroll was completed</strong><br>
+          3. Click <strong>Customize</strong> and include <strong>Hours</strong><br>
+          4. <strong>Run Report</strong>, then <strong>Export to Excel</strong> and upload below<br>
+          <br>
+          <strong>📌 Note:</strong> Dates prior to <strong>January 25</strong> are already calculated in the system (Jan 1–8 work hours and PTO are pulled automatically from Playground timecards and director time-off entries). The Jan 1 and Jan 15 paychecks cover December work, so they are intentionally excluded from this upload.
         </div>
-        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates PTO used (paid time off hours) on the PTO Summary. All hours that are not Regular Pay, Overtime, or Salary are counted as PTO used.</p>
+        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates <strong>year-to-date hours worked</strong> and <strong>year-to-date PTO used</strong> on the PTO Summary. Each upload replaces the prior YTD totals — you do not need to re-upload past reports. Hours = Regular Pay + Overtime + Salary. PTO = everything else (Sick, Holiday, Paid Time Off, etc.); Bonus is excluded. PTO is not tracked for salaried staff.</p>
         <input type="file" id="qbFile" accept=".xls,.xlsx" style="margin-bottom:12px">
         <button class="btn btn-primary" onclick="uploadQBPayroll()">Upload QuickBooks Report</button>
         <div id="qbUploadResult" style="margin-top:12px"></div>`;
