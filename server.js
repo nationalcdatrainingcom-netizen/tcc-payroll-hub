@@ -398,9 +398,22 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   const qbYtdHours = qbHoursRow.rows[0]?.ytd_hours_worked_qb;
   let totalHoursWorked;
   let hoursWorkedSource;
+  // Crossover Jan 1-8 work hours: the QB YTD report is run from Jan 25 onward each year (to exclude
+  // the Jan 1 and Jan 15 paychecks, which cover December work). Jan 1-8 work hours therefore aren't
+  // in the QB YTD upload — they live in daily_hours (Playground timecards). Pull them here and add
+  // them back so accrual is accurate. This mirrors the existing Jan 1-8 PTO crossover below.
+  // Only applied when the QB upload IS the source; the daily_hours fallback already includes Jan 1-8.
+  const crossoverStart = `${currentYear}-01-01`;
+  const crossoverEnd = `${currentYear}-01-08`;
+  let crossoverWorkHours = 0;
   if (qbYtdHours !== null && qbYtdHours !== undefined) {
-    totalHoursWorked = parseFloat(qbYtdHours);
-    hoursWorkedSource = 'qb';
+    const crossoverWorkResult = await pool.query(
+      `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours WHERE employee_id = $1 AND work_date >= $2 AND work_date <= $3`,
+      [empId, crossoverStart, crossoverEnd]
+    );
+    crossoverWorkHours = parseFloat(crossoverWorkResult.rows[0].total_hours) || 0;
+    totalHoursWorked = parseFloat(qbYtdHours) + crossoverWorkHours;
+    hoursWorkedSource = 'qb+crossover';
   } else {
     const hoursResult = await pool.query(
       `SELECT COALESCE(SUM(hours_worked), 0) as total_hours FROM daily_hours WHERE employee_id = $1 AND EXTRACT(YEAR FROM work_date) = $2`,
@@ -419,11 +432,8 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
     (await pool.query('SELECT pto_hours_used_qb FROM employees WHERE id = $1', [empId])).rows[0]?.pto_hours_used_qb || 0);
   
   // Crossover-period PTO: P-marked time_off_entries from Jan 1 through Jan 8 of the current year
-  // were paid out on a pay period that started in the prior year (Dec 24 - Jan 8),
-  // so they weren't captured by QB payroll imports targeting 2026 pay dates.
-  // Add them to the hoursUsed count so they're reflected in the PTO summary.
-  const crossoverEnd = `${currentYear}-01-08`;
-  const crossoverStart = `${currentYear}-01-01`;
+  // were paid out on the Jan 15 paycheck (pay period Dec 24-Jan 8), which is excluded from the
+  // QB YTD upload (start date Jan 25). Add them back here so the displayed PTO used is correct.
   const crossoverResult = await pool.query(
     `SELECT COUNT(*) as count FROM time_off_entries WHERE employee_id = $1 AND entry_type = 'P' AND entry_date >= $2 AND entry_date <= $3`,
     [empId, crossoverStart, crossoverEnd]
@@ -445,6 +455,7 @@ async function calculateActualPTO(empId, yearHired, isFullTime, isAdmin, weeklyH
   return {
     totalHoursWorked: Math.round(totalHoursWorked * 100) / 100,
     hoursWorkedSource,
+    crossoverWorkHours: Math.round(crossoverWorkHours * 100) / 100,
     accruedHours: Math.round(accruedHours * 100) / 100,
     accruedDays: Math.round((accruedHours / hoursPerDay) * 100) / 100,
     accrualRate: '1hr per 20hrs worked', accrualCap: 80,
