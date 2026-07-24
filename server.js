@@ -831,26 +831,63 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     const XLSX = require('xlsx');
     const wb = XLSX.readFile(req.file.path);
     fs.unlinkSync(req.file.path); // clean up temp file
-    const ws = wb.Sheets[wb.SheetNames[0]];
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // SHEET SELECTION
+    //
+    // QuickBooks Online exports TWO sheets:
+    //   "Default layout"     — a collapsed presentation view (3 narrow columns).
+    //                          Not parseable; pay-type detail is not present.
+    //   "Calculation layout" — the real grid, one row per employee with a
+    //                          separate "Hours - <pay type>" column for each type.
+    //
+    // QuickBooks Desktop exports a single sheet. Prefer "Calculation layout" when
+    // present, otherwise take the widest sheet, otherwise fall back to the first.
+    // ──────────────────────────────────────────────────────────────────────────
+    function pickSheetName(workbook) {
+      const named = workbook.SheetNames.find(n => /calculation/i.test(n));
+      if (named) return named;
+      let best = workbook.SheetNames[0];
+      let bestWidth = -1;
+      for (const n of workbook.SheetNames) {
+        const rows = XLSX.utils.sheet_to_json(workbook.Sheets[n], { header: 1 });
+        const w = rows.reduce((m, r) => Math.max(m, (r || []).length), 0);
+        if (w > bestWidth) { bestWidth = w; best = n; }
+      }
+      return best;
+    }
+
+    const sheetName = pickSheetName(wb);
+    const ws = wb.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(ws, { header: 1 });
 
     // ──────────────────────────────────────────────────────────────────────────
-    // YTD PAYROLL SUMMARY PARSER  (replaces previous per-period parser)
+    // YTD PAYROLL SUMMARY PARSER — handles BOTH report layouts
     //
-    // The QB "Payroll Summary by Employee" report is TRANSPOSED:
-    //   Row 0-3 : header / company / date range
-    //   Row N   : "Item" + employee names ("Last First [Middle]") starting at column 2
-    //             ("Total" is column 1 — that's the company-wide total, skipped)
-    //   Row N+1+: pay-type rows. Column 0 = label, column 1 = grand total, columns 2+ = per-employee values.
+    // LAYOUT A (QuickBooks Desktop, transposed):
+    //   Row N   : "Item" + employee names ("Last First [Middle]") from column 2
+    //             ("Total" is column 1 — company-wide total, skipped)
+    //   Row N+1+: pay-type rows. Column 0 = label, column 1 = grand total,
+    //             columns 2+ = per-employee values.
+    //
+    // LAYOUT B (QuickBooks Online, one row per employee):
+    //   Row N   : "Name" + "Hours - total" + "Hours - Regular Pay" +
+    //             "Hours - Sick Pay" + ... one column per pay type
+    //   Row N+1+: one row per employee ("Last, First [Middle]"), final row "Total"
     //
     // The report represents YEAR-TO-DATE totals. Each upload REPLACES the YTD
     // figures for hours worked and PTO used (it does not add to them).
     //
-    // Pay-type categorization:
+    // Pay-type categorization (identical for both layouts):
     //   HOURS WORKED YTD = "Hours - Regular Pay" + "Hours - Overtime Pay" + "Hours - Salary"
-    //   PTO USED YTD     = every other "Hours - ..." row (Sick, Holiday, Paid time off, etc.)
-    //   SKIPPED          = "Hours - Bonus", "Hours - total", any "Other pay - ..." row,
-    //                      and any row that is not prefixed "Hours - " (those are dollars).
+    //   PTO USED YTD     = every other "Hours - ..." field (Sick Pay, Holiday Pay,
+    //                      Paid time off, Paid time, Sick/Pto/Holiday, Mental Health, ...)
+    //   SKIPPED          = "Hours - Bonus", "Hours - total", any "Other pay - ..." field,
+    //                      and anything not prefixed "Hours - " (those are dollars).
+    //
+    // PTO is deliberately NOT an allow-list. Any pay type that is not explicitly
+    // Regular/Overtime/Salary counts as PTO, so a pay type added in QuickBooks
+    // later is picked up automatically instead of being silently dropped.
     //
     // Salaried staff (anyone with "Hours - Salary" > 0): hours worked IS recorded,
     // but PTO USED IS NOT TOUCHED — per Mary's rule that salaried staff PTO is not
@@ -865,95 +902,201 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
 
     const debugInfo = {
       sheetNames: wb.SheetNames,
+      sheetUsed: sheetName,
       totalRows: data.length,
       sampleRows: data.slice(0, 20).map((r, i) => ({ row: i, cols: (r || []).slice(0, 5) })),
       filename: req.file?.originalname || 'unknown'
     };
 
-    // Locate the "Item" header row and the report date range
+    // Shared pay-type categorization
+    const HOURS_PREFIX_RE = /^Hours\s*-\s*(.+)$/i;
+    const WORKED_TYPES = new Set(['regular pay', 'overtime pay', 'salary']);
+    const SKIP_TYPES = new Set(['bonus', 'total']);
+    function categorizePayType(subtype) {
+      if (SKIP_TYPES.has(subtype)) return 'skip';
+      if (WORKED_TYPES.has(subtype)) return 'worked';
+      return 'pto';
+    }
+
+    // ── Locate the header row and detect which layout we are looking at ──
     let nameRowIdx = -1;
+    let layout = null;          // 'transposed' (Desktop) or 'byRow' (Online)
     let dateRange = '';
-    for (let i = 0; i < Math.min(data.length, 20); i++) {
+
+    for (let i = 0; i < Math.min(data.length, 25); i++) {
       const row = data[i] || [];
       const col0 = String(row[0] || '').trim();
+
       if (!dateRange && (col0.startsWith('From ') ||
           /\d{1,2}\/\d{1,2}\/\d{2,4}\s*(to|-|through)/i.test(col0) ||
           /(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b.+\d{4}/i.test(col0))) {
         dateRange = col0;
       }
+
+      // LAYOUT A: "Item" followed by employee names
       if (col0 === 'Item' && row.length > 5) {
         nameRowIdx = i;
+        layout = 'transposed';
+        break;
+      }
+
+      // LAYOUT B: "Name" followed by "Hours - ..." columns
+      if (col0.toLowerCase() === 'name' &&
+          row.some(c => HOURS_PREFIX_RE.test(String(c || '').trim()))) {
+        nameRowIdx = i;
+        layout = 'byRow';
         break;
       }
     }
 
     if (nameRowIdx === -1) {
       return res.status(400).json({
-        error: 'Could not find employee header row. Expected a row starting with "Item" followed by employee names. Please confirm this is a QuickBooks "Payroll summary by employee" report exported as .xlsx/.xls.',
+        error: 'Could not find the employee header row. Expected either a row starting with "Item" followed by employee names, or a row starting with "Name" followed by "Hours - ..." columns. Please confirm this is a QuickBooks "Payroll summary by employee" report exported to Excel with Hours included.',
         debug: debugInfo
       });
     }
 
-    // Build per-column employee list from the header row.
-    // Column 0 = "Item" label, column 1 = "Total" company-wide column (skip), columns 2+ = employees.
     const empCols = [];
-    const nameRow = data[nameRowIdx];
-    for (let c = 2; c < nameRow.length; c++) {
-      const raw = String(nameRow[c] || '').trim();
-      if (!raw) continue;
-      // Strip leading asterisk (terminated-employee marker) and collapse whitespace
-      const cleaned = raw.replace(/^\*+/, '').replace(/\s+/g, ' ').trim();
-      if (!cleaned) continue;
-      empCols.push({
-        col: c,
-        rawName: raw,
-        cleanName: cleaned,
-        ytd: { worked: 0, pto: 0, isSalaried: false, payTypes: [] }
+    const parseLog = [];
+    const reconMismatches = [];   // rows where components != reported total
+    let componentFieldCount = 0;  // how many real pay-type fields the report contained
+
+    if (layout === 'transposed') {
+      // ── LAYOUT A: QuickBooks Desktop ────────────────────────────────────────
+      // Column 0 = "Item" label, column 1 = "Total" company-wide column (skip),
+      // columns 2+ = employees.
+      const nameRow = data[nameRowIdx];
+      for (let c = 2; c < nameRow.length; c++) {
+        const raw = String(nameRow[c] || '').trim();
+        if (!raw) continue;
+        // Strip leading asterisk (inactive-employee marker) and collapse whitespace
+        const cleaned = raw.replace(/^\*+/, '').replace(/\s+/g, ' ').trim();
+        if (!cleaned) continue;
+        empCols.push({
+          col: c,
+          rawName: raw,
+          cleanName: cleaned,
+          ytd: { worked: 0, pto: 0, isSalaried: false, payTypes: [] }
+        });
+      }
+
+      // Walk pay-type rows after the header row
+      for (let i = nameRowIdx + 1; i < data.length; i++) {
+        const row = data[i] || [];
+        const label = String(row[0] || '').trim();
+        if (!label) continue;
+
+        const m = label.match(HOURS_PREFIX_RE);
+        if (!m) continue;  // Not an "Hours - ..." row (Other pay rows, dollar rows)
+
+        const subtype = m[1].toLowerCase().trim();
+        const category = categorizePayType(subtype);
+        parseLog.push({ row: i, label, subtype, category });
+        if (category === 'skip') continue;
+        componentFieldCount++;
+
+        for (const ec of empCols) {
+          const v = parseFloat(row[ec.col]);
+          if (!v || isNaN(v) || v <= 0) continue;
+          if (category === 'worked') {
+            ec.ytd.worked += v;
+            ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'worked' });
+            if (subtype === 'salary') ec.ytd.isSalaried = true;
+          } else {
+            ec.ytd.pto += v;
+            ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'pto' });
+          }
+        }
+      }
+
+    } else {
+      // ── LAYOUT B: QuickBooks Online ─────────────────────────────────────────
+      const headerRow = (data[nameRowIdx] || []).map(c => String(c || '').trim());
+      const nameColIdx = headerRow.findIndex(h => h.toLowerCase() === 'name');
+
+      // Map every "Hours - ..." column to a bucket
+      const hourCols = [];
+      headerRow.forEach((h, idx) => {
+        const m = h.match(HOURS_PREFIX_RE);
+        if (!m) return;
+        const subtype = m[1].toLowerCase().trim();
+        const isTotal = subtype === 'total';
+        const category = categorizePayType(subtype);
+        hourCols.push({ idx, label: h, subtype, category, isTotal });
+        parseLog.push({ col: idx, label: h, subtype, category: isTotal ? 'checksum' : category });
+        if (!isTotal && category !== 'skip') componentFieldCount++;
+      });
+
+      for (let i = nameRowIdx + 1; i < data.length; i++) {
+        const row = data[i] || [];
+        const raw = String(row[nameColIdx] || '').trim();
+        if (!raw) continue;
+        if (raw.toLowerCase() === 'total') continue;   // report footer row
+        const cleaned = raw.replace(/^\*+/, '').replace(/\s+/g, ' ').trim();
+        if (!cleaned) continue;
+
+        const rec = {
+          col: i,
+          rawName: raw,
+          cleanName: cleaned,
+          ytd: { worked: 0, pto: 0, isSalaried: false, payTypes: [] }
+        };
+
+        let reportedTotal = null;
+        for (const hc of hourCols) {
+          const v = parseFloat(row[hc.idx]);
+          if (hc.isTotal) {
+            if (!isNaN(v)) reportedTotal = v;
+            continue;
+          }
+          if (hc.category === 'skip') continue;
+          if (!v || isNaN(v) || v <= 0) continue;
+          if (hc.category === 'worked') {
+            rec.ytd.worked += v;
+            rec.ytd.payTypes.push({ type: hc.label, hours: v, bucket: 'worked' });
+            if (hc.subtype === 'salary') rec.ytd.isSalaried = true;
+          } else {
+            rec.ytd.pto += v;
+            rec.ytd.payTypes.push({ type: hc.label, hours: v, bucket: 'pto' });
+          }
+        }
+
+        // Reconcile against the report's own "Hours - total" column when present
+        if (reportedTotal !== null) {
+          const sum = rec.ytd.worked + rec.ytd.pto;
+          if (Math.abs(reportedTotal - sum) > 0.01) {
+            reconMismatches.push({
+              name: cleaned,
+              reported: Math.round(reportedTotal * 100) / 100,
+              components: Math.round(sum * 100) / 100
+            });
+          }
+        }
+
+        empCols.push(rec);
+      }
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // SAFETY GUARDS
+    //
+    // QuickBooks Online will happily export this report with only a single
+    // total-hours column and no pay-type breakdown. Importing that file would
+    // post every employee's PTO as 0 and overstate hours worked by every sick,
+    // holiday and PTO hour. Refuse the upload instead of corrupting the data.
+    // ──────────────────────────────────────────────────────────────────────────
+    if (componentFieldCount === 0) {
+      return res.status(400).json({
+        error: 'This report has a total-hours column but no breakdown by pay type, so hours worked cannot be separated from PTO. Re-run the report and add the individual pay types (Regular Pay, Overtime Pay, Salary, Sick Pay, Holiday Pay, Paid time off) before exporting.',
+        debug: { ...debugInfo, layout, parseLog: parseLog.slice(0, 40) }
       });
     }
 
-    // Pay-type categorization
-    const HOURS_PREFIX_RE = /^Hours\s*-\s*(.+)$/i;
-    const WORKED_TYPES = new Set(['regular pay', 'overtime pay', 'salary']);
-    const SKIP_TYPES = new Set(['bonus', 'total']);
-    // Anything else under "Hours - " is treated as PTO used.
-
-    const parseLog = [];
-
-    // Walk pay-type rows after the header row
-    for (let i = nameRowIdx + 1; i < data.length; i++) {
-      const row = data[i] || [];
-      const label = String(row[0] || '').trim();
-      if (!label) continue;
-
-      const m = label.match(HOURS_PREFIX_RE);
-      if (!m) {
-        // Not a "Hours - ..." row — skip silently (Other pay rows, dollar rows, blank rows)
-        continue;
-      }
-
-      const subtype = m[1].toLowerCase().trim();
-      let category;
-      if (SKIP_TYPES.has(subtype)) category = 'skip';
-      else if (WORKED_TYPES.has(subtype)) category = 'worked';
-      else category = 'pto';
-
-      parseLog.push({ row: i, label, subtype, category });
-      if (category === 'skip') continue;
-
-      // Distribute this row's values across employee columns
-      for (const ec of empCols) {
-        const v = parseFloat(row[ec.col]);
-        if (!v || isNaN(v) || v <= 0) continue;
-        if (category === 'worked') {
-          ec.ytd.worked += v;
-          ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'worked' });
-          if (subtype === 'salary') ec.ytd.isSalaried = true;
-        } else {
-          ec.ytd.pto += v;
-          ec.ytd.payTypes.push({ type: label, hours: v, bucket: 'pto' });
-        }
-      }
+    if (empCols.length > 0 && reconMismatches.length >= Math.ceil(empCols.length / 2)) {
+      return res.status(400).json({
+        error: `Import stopped: ${reconMismatches.length} of ${empCols.length} employees do not reconcile — the pay-type columns do not add up to the reported total hours. This usually means the report was exported with some pay types collapsed or hidden. Re-run the report with all pay types visible and try again.`,
+        debug: { ...debugInfo, layout, mismatches: reconMismatches.slice(0, 20) }
+      });
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -975,6 +1118,35 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     }));
 
     function matchEmployee(cleanName) {
+      // ── Comma form: QuickBooks Online writes "Last, First [Middle]" ──
+      // A comma is an unambiguous last/first split, so trust it before falling
+      // back to the token-guessing strategies used for the Desktop format
+      // ("Last First [Middle]", no comma). Handles "Harrison , Alexis E" and
+      // multi-word surnames like "De Sousa Salcher, Samantha".
+      if (cleanName.includes(',')) {
+        const parts = cleanName.split(',');
+        const cLast = (parts[0] || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        let cFirst = (parts.slice(1).join(' ') || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        cFirst = cFirst.replace(/\s+[a-z]\.?$/i, '').trim();  // drop trailing middle initial
+        const cFirstWord = cFirst.split(' ')[0];
+        if (cLast && cFirstWord) {
+          const exact = allEmployees.find(e => e.lastLc === cLast && e.firstLc === cFirst);
+          if (exact) return exact;
+          const firstWord = allEmployees.find(e => e.lastLc === cLast && e.firstLc === cFirstWord);
+          if (firstWord) return firstWord;
+          // Hyphen/space-insensitive surname, prefix-tolerant first name
+          const compact = cLast.replace(/[-\s]/g, '');
+          const loose = allEmployees.find(e => {
+            if (e.lastLc.replace(/[-\s]/g, '') !== compact) return false;
+            return e.firstLc === cFirst || e.firstLc === cFirstWord ||
+                   e.firstLc.startsWith(cFirstWord) || cFirstWord.startsWith(e.firstLc);
+          });
+          if (loose) return loose;
+        }
+        // No match on the comma split — fall through with the comma removed
+        cleanName = cleanName.replace(/,/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+
       // Normalize: lowercase, collapse whitespace, strip trailing single-letter middle initial
       let norm = cleanName.toLowerCase().replace(/\s+/g, ' ').trim();
       norm = norm.replace(/\s+[a-z]$/i, '').trim();
@@ -1121,7 +1293,10 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
         [req.file?.originalname, req.session.user.full_name, req.session.user.id, data.length, matched,
          JSON.stringify({
            dateRange,
+           layout,
+           sheetUsed: sheetName,
            parseLog: parseLog.slice(0, 40),
+           reconMismatches: reconMismatches.slice(0, 20),
            totalEmployeeColumns: empCols.length,
            unmatched: unmatched.slice(0, 20),
            salariedSkippedPto
@@ -1136,10 +1311,13 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       salariedSkippedPto,
       results,
       debug: {
+        layout,
+        sheetUsed: sheetName,
         totalRows: data.length,
         sampleRows: debugInfo.sampleRows,
         parseLog: parseLog.slice(0, 20),
         employeeColumns: empCols.length,
+        reconMismatches,
         unmatched
       }
     });
