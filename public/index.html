@@ -2714,12 +2714,14 @@ async function renderPayroll() {
           <strong>Instructions:</strong><br>
           1. In QuickBooks, go to <strong>Reports → Payroll Summary by Employee</strong><br>
           2. Set the date range from <strong>January 25</strong> to <strong>the date payroll was completed</strong><br>
-          3. Click <strong>Customize</strong> and include <strong>Hours</strong><br>
+          3. Click <strong>Customize</strong> and turn on the <strong>individual pay types</strong> under Hours — Regular Pay, Overtime Pay, Salary, Sick Pay, Holiday Pay, Paid time off, and any others in use<br>
           4. <strong>Run Report</strong>, then <strong>Export to Excel</strong> and upload below<br>
+          <br>
+          <strong>⚠️ The "Hours - total" column on its own is not enough.</strong> Without the individual pay types, hours worked cannot be separated from PTO, and the upload will be rejected rather than post wrong numbers.<br>
           <br>
           <strong>📌 Note:</strong> Dates prior to <strong>January 25</strong> are already calculated in the system (Jan 1–8 work hours and PTO are pulled automatically from Playground timecards and director time-off entries). The Jan 1 and Jan 15 paychecks cover December work, so they are intentionally excluded from this upload.
         </div>
-        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates <strong>year-to-date hours worked</strong> and <strong>year-to-date PTO used</strong> on the PTO Summary. Each upload replaces the prior YTD totals — you do not need to re-upload past reports. Hours = Regular Pay + Overtime + Salary. PTO = everything else (Sick, Holiday, Paid Time Off, etc.); Bonus is excluded. PTO is not tracked for salaried staff.</p>
+        <p style="font-size:13px;color:var(--gray-600);margin-bottom:12px">This report updates <strong>year-to-date hours worked</strong> and <strong>year-to-date PTO used</strong> on the PTO Summary. Each upload replaces the prior YTD totals — you do not need to re-upload past reports. Hours = Regular Pay + Overtime + Salary. PTO = everything else (Sick, Holiday, Paid Time Off, Mental Health, etc.); Bonus is excluded. PTO is not tracked for salaried staff. Both QuickBooks report layouts are accepted, and every employee row is checked against its own total-hours figure before anything is saved.</p>
         <input type="file" id="qbFile" accept=".xls,.xlsx" style="margin-bottom:12px">
         <button class="btn btn-primary" onclick="uploadQBPayroll()">Upload QuickBooks Report</button>
         <div id="qbUploadResult" style="margin-top:12px"></div>`;
@@ -2907,7 +2909,7 @@ async function uploadQBPayroll() {
         <div style="font-weight:700;color:var(--warning);margin-bottom:8px">⚠️ No PTO Hours Found in Report</div>
         <div style="font-size:13px;color:var(--navy);margin-bottom:8px">The system read ${data.debug?.totalRows || '?'} rows from the spreadsheet but couldn't find any PTO pay items.</div>
         <div style="font-size:12px;color:var(--gray-600);margin-bottom:8px">
-          <strong>Expected format:</strong> QuickBooks "Payroll Summary" report exported as .xlsx. The system looks for employee names in the format "Last, First" followed by pay types like "Paid Time Off", "PTO", "Vacation", etc.
+          <strong>Expected format:</strong> QuickBooks "Payroll Summary by Employee" report exported to Excel. The system accepts either layout — employee names running across as columns, or one row per employee ("Last, First") with a separate "Hours - ..." column for each pay type. Make sure the individual pay types are turned on, not just the Hours total.
         </div>
         ${data.debug?.sampleRows ? `<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12px;font-weight:600;color:var(--info)">Show what the system read (first 10 rows)</summary>
           <div style="background:white;padding:8px;border-radius:4px;margin-top:4px;font-family:'JetBrains Mono',monospace;font-size:10px;max-height:200px;overflow:auto">
@@ -2938,7 +2940,13 @@ async function uploadQBPayroll() {
     if (data.matched > 0) {
       setTimeout(() => renderPayroll(), 3000);
     }
-  } catch(e) { resultDiv.innerHTML = `<div style="color:var(--danger)">Error: ${e.message}</div>`; }
+  } catch(e) {
+    resultDiv.innerHTML = `<div style="background:var(--warning-bg);border:2px solid var(--danger);border-radius:8px;padding:16px">
+      <div style="font-weight:700;color:var(--danger);margin-bottom:8px">⚠️ Upload not accepted</div>
+      <div style="font-size:13px;color:var(--navy);line-height:1.6">${e.message || 'Unknown error'}</div>
+      <div style="font-size:12px;color:var(--gray-600);margin-top:10px">Nothing was saved — your existing YTD hours and PTO totals are unchanged.</div>
+    </div>`;
+  }
 }
 
 async function approveChangeReq(id) {
