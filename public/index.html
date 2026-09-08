@@ -396,19 +396,23 @@ let currentYear = new Date().getFullYear();
 let selectedCenter = 'all';
 let pendingIncreases = 0; let otViewCenter = 'all'; let otViewShowAll = false;
 
-const CENTERS = ['Peace Boulevard', 'Niles', 'Montessori'];
-const PEACE_CLASSROOMS = [
-  { section: 'Infants - Caterpillars', roles: ['Co-Lead','Co-Lead'] },
-  { section: 'Infants/Toddlers - Butterflies', roles: ['Lead','Assistant'] },
-  { section: 'Toddlers - Dolphins', roles: ['Lead','Assistant'] },
-  { section: 'Toddlers - Kangas', roles: ['Lead','Assistant'] },
-  { section: 'Toddlers - Lions', roles: ['Lead','Assistant'] },
-  { section: 'Montessori Infants', roles: ['Lead','Assistant','Assistant','Assistant'] },
-  { section: 'Twos - Bears', roles: ['Lead','Assistant'] },
-  { section: 'Twos/Threes - Tigers', roles: ['Lead','Assistant'] },
-  { section: 'GSRP - Penguins', roles: ['Lead','Assistant','Caregiver'] },
-  { section: 'GSRP - Dinos', roles: ['Lead','Assistant','Assistant'] },
-  { section: 'Threes/Fours Flamingos', roles: ['Lead','Assistant'] },
+// Peace Boulevard merged into Montessori. Two centers remain.
+// MUST stay in sync with CENTERS in server.js.
+const CENTERS = ['Montessori', 'Niles'];
+
+// Combined Montessori center — post-merge classrooms with licensing ratios.
+// NOTE: `roles` is not consumed by the renderer (only `section` and `ratio` are);
+// it is kept for reference on expected room composition.
+const MONTESSORI_CLASSROOMS = [
+  { section: 'Seedlings', ratio: '1:4',  roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Sprouts',   ratio: '1:4',  roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Saplings',  ratio: '1:4',  roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Acorns',    ratio: '1:4',  roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Maple',     ratio: '1:8',  roles: ['Lead','Assistant','Assistant'] },
+  { section: 'Redwood',   ratio: '1:10', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Spruce',    ratio: '1:10', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Oak',       ratio: '1:10', roles: ['Lead','Assistant','Caregiver'] },
+  { section: 'Willow',    ratio: '1:10', roles: ['Lead','Assistant','Caregiver'] },
   { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater','Floater','Floater','Floater','Floater'] },
   { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
   { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
@@ -431,24 +435,9 @@ const NILES_CLASSROOMS = [
   { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
 ];
 
-const MCC_CLASSROOMS = [
-  { section: 'Toddlers - Purple', roles: ['Lead','Assistant','Assistant'] },
-  { section: 'Pre-Primary - Yellow', roles: ['Lead','Assistant','Assistant'] },
-  { section: 'Primary - Red', roles: ['Lead','Assistant','Caregiver'] },
-  { section: 'GSRP - Orange', roles: ['Lead','Assistant','Caregiver'] },
-  { section: 'GSRP - Blue', roles: ['Lead','Assistant','Caregiver'] },
-  { section: 'GSRP - Pink', roles: ['Lead','Assistant','Caregiver'] },
-  { section: 'Floaters', roles: ['Floater','Floater','Floater','Floater'] },
-  { section: 'Subs from other centers', roles: ['Sub','Sub','Sub','Sub','Sub'] },
-  { section: 'Therapist / Unsupervised Volunteers', roles: ['','','','',''] },
-  { section: 'Supervised Volunteers', roles: ['','','','','',''] },
-  { section: 'Admin / Office / Food Prep', roles: ['Director','Asst. Director','Office','Food Prep','Food Prep'] }
-];
-
 const CENTER_CLASSROOMS = {
-  'Peace Boulevard': PEACE_CLASSROOMS,
-  'Niles': NILES_CLASSROOMS,
-  'Montessori': MCC_CLASSROOMS
+  'Montessori': MONTESSORI_CLASSROOMS,
+  'Niles': NILES_CLASSROOMS
 };
 
 const REASON_CATEGORIES = ['Position Change', 'Education Level', 'CDA Credential', 'Registered Apprentice Hours', 'Annual Review', 'Market Adjustment', 'Other'];
@@ -525,7 +514,7 @@ async function showApp() {
   if (currentUser.role === 'director') {
     selectedCenter = currentUser.center;
   } else {
-    selectedCenter = 'Peace Boulevard';
+    selectedCenter = 'Montessori';
   }
   
   navigate('dashboard');
@@ -1481,7 +1470,7 @@ async function renderTimeOff() {
   const isDirector = currentUser.role === 'director';
   const isPayroll = ['owner','payroll'].includes(currentUser.role);
   const filtered = isDirector ? employees.filter(e => (e.payroll_center || e.center) === currentUser.center) : employees;
-  const center = isDirector ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
+  const center = isDirector ? currentUser.center : (selectedCenter === 'all' ? 'Montessori' : selectedCenter);
   
   // Get dates in current pay period
   const start = new Date(payPeriod.start + 'T12:00:00');
@@ -1738,7 +1727,7 @@ async function requestTimeOffChange() {
 }
 
 async function approveTimeOffChange() {
-  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  const center = selectedCenter === 'all' ? 'Montessori' : selectedCenter;
   if (!confirm('Approve the change request and unlock time off for editing?')) return;
   try {
     await api('/api/payroll-workflow/approve-timeoff-change', { method: 'POST', body: {
@@ -1749,7 +1738,7 @@ async function approveTimeOffChange() {
 }
 
 async function denyTimeOffChange() {
-  const center = selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter;
+  const center = selectedCenter === 'all' ? 'Montessori' : selectedCenter;
   if (!confirm('Deny this change request?')) return;
   try {
     await api('/api/payroll-workflow/deny-timeoff-change', { method: 'POST', body: {
@@ -2532,7 +2521,7 @@ async function renderPayroll() {
   
   if (!isDirector) {
     html += `<div class="center-tabs">`;
-    ['Peace Boulevard','Niles','Montessori'].forEach(c => {
+    CENTERS.forEach(c => {
       const p = periods[c];
       const statusIcon = p?.payroll_closed ? '✅' : p?.director_closed ? '📨' : p?.timecards_uploaded ? '📋' : '⏳';
       html += `<div class="center-tab ${selectedCenter===c?'active':''}" onclick="selectedCenter='${c}';renderPayroll()">${statusIcon} ${c}</div>`;
@@ -2562,8 +2551,8 @@ async function renderPayroll() {
         <div style="font-size:11px;font-weight:700;margin-top:4px">Payroll Processed</div>
         ${pp.payroll_closed_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.payroll_closed_by}</div>` : ''}
       </div>
-      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.qb_uploaded || ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded)?'var(--success-bg)':'var(--gray-100)'}">
-        <div style="font-size:20px">${pp.qb_uploaded || ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded)?'✅':'4️⃣'}</div>
+      <div style="padding:14px;border-radius:8px;text-align:center;background:${pp.qb_uploaded || CENTERS.some(c => periods[c]?.qb_uploaded)?'var(--success-bg)':'var(--gray-100)'}">
+        <div style="font-size:20px">${pp.qb_uploaded || CENTERS.some(c => periods[c]?.qb_uploaded)?'✅':'4️⃣'}</div>
         <div style="font-size:11px;font-weight:700;margin-top:4px">QB Summary</div>
         ${pp.qb_uploaded_by ? `<div style="font-size:10px;color:var(--gray-600);margin-top:2px">${pp.qb_uploaded_by}</div>` : ''}
         ${pp.qb_uploaded_at ? `<div style="font-size:10px;color:var(--gray-400);margin-top:1px">${new Date(pp.qb_uploaded_at).toLocaleDateString()}</div>` : ''}
@@ -2652,7 +2641,7 @@ async function renderPayroll() {
     
     // Close out button for Jared
     if (!pp.payroll_closed) {
-      const allDone = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.timecards_uploaded && (periods[c]?.timeoff_submitted || periods[c]?.timeoff_approved));
+      const allDone = CENTERS.every(c => periods[c]?.timecards_uploaded && (periods[c]?.timeoff_submitted || periods[c]?.timeoff_approved));
       const hasPendingPI = pendingIncreases.length > 0;
       html += `<div class="card"><div class="card-header"><h3>Step 4: Process Payroll</h3></div><div class="card-body">`;
       if (allDone && !hasPendingPI) {
@@ -2663,7 +2652,7 @@ async function renderPayroll() {
         </div>`;
       } else {
         const blockers = [];
-        const waiting = ['Peace Boulevard','Niles','Montessori'].filter(c => !periods[c]?.timecards_uploaded || (!periods[c]?.timeoff_submitted && !periods[c]?.timeoff_approved));
+        const waiting = CENTERS.filter(c => !periods[c]?.timecards_uploaded || (!periods[c]?.timeoff_submitted && !periods[c]?.timeoff_approved));
         if (waiting.length > 0) {
           const details = waiting.map(c => {
             const p = periods[c] || {};
@@ -2693,8 +2682,8 @@ async function renderPayroll() {
   // Show ONCE (not per center) since the QB report covers all locations
   if (isPayroll) {
     // Check if ANY center has qb_uploaded set
-    const anyQbDone = ['Peace Boulevard','Niles','Montessori'].some(c => periods[c]?.qb_uploaded);
-    const qbInfo = ['Peace Boulevard','Niles','Montessori'].map(c => periods[c]).find(p => p?.qb_uploaded) || {};
+    const anyQbDone = CENTERS.some(c => periods[c]?.qb_uploaded);
+    const qbInfo = CENTERS.map(c => periods[c]).find(p => p?.qb_uploaded) || {};
     
     html += `<div class="card" style="margin-top:20px"><div class="card-header"><h3>Step 5: Upload QuickBooks Payroll Summary</h3>
       ${anyQbDone ? '<span class="badge badge-success">Complete</span>' : ''}
@@ -2733,7 +2722,7 @@ async function renderPayroll() {
     html += `</div></div>`;
     
     // ---- Period Complete Status ----
-    const allPayrollClosed = ['Peace Boulevard','Niles','Montessori'].every(c => periods[c]?.payroll_closed);
+    const allPayrollClosed = CENTERS.every(c => periods[c]?.payroll_closed);
     if (allPayrollClosed && anyQbDone) {
       html += `<div class="card" style="margin-top:20px;border-left:4px solid var(--success)"><div class="card-body" style="text-align:center;padding:24px">
         <div style="font-size:24px;margin-bottom:8px">✅</div>
@@ -3299,8 +3288,8 @@ async function renderStaffingPlan() {
   }
   html += `</div>`;
   
-  const center = currentUser.role === 'director' ? currentUser.center : (selectedCenter === 'all' ? 'Peace Boulevard' : selectedCenter);
-  if (selectedCenter === 'all' && currentUser.role !== 'director') selectedCenter = 'Peace Boulevard';
+  const center = currentUser.role === 'director' ? currentUser.center : (selectedCenter === 'all' ? 'Montessori' : selectedCenter);
+  if (selectedCenter === 'all' && currentUser.role !== 'director') selectedCenter = 'Montessori';
   
   // Signature display
   // Load staffing plan data from DB
@@ -3351,8 +3340,10 @@ async function renderStaffingPlan() {
     classroomMap[s.classroom].push(s);
   });
   
-  const template = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const template = CENTER_CLASSROOMS[center] || MONTESSORI_CLASSROOMS;
   const templateSections = template.map(t => t.section);
+  const roomRatios = {};
+  template.forEach(t => { if (t.ratio) roomRatios[t.section] = t.ratio; });
   
   // Only show classrooms from this center's template — no extras
   const nonTemplateStaff = [];
@@ -3434,7 +3425,7 @@ async function renderStaffingPlan() {
     html += `<tr style="background:var(--navy);color:white">
       <td colspan="${colSpan}" style="padding:8px 14px;font-weight:700">
         <div style="display:flex;align-items:center;justify-content:space-between">
-          <span>${classroom}</span>
+          <span>${classroom}${roomRatios[classroom] ? ` <span style="font-size:10px;font-weight:600;opacity:0.75;margin-left:6px">Ratio ${roomRatios[classroom]}</span>` : ''}</span>
           <span style="display:flex;gap:6px">`;
     if (canManageSubs && isSubs) {
       html += `<button style="background:var(--gold);color:var(--navy-dark);border:none;border-radius:4px;padding:3px 10px;font-size:10px;font-weight:700;cursor:pointer" onclick="showPullSubModal('${center.replace(/'/g,"\\'")}')">+ Pull Staff from Another Center</button>`;
@@ -3589,7 +3580,7 @@ async function doMoveStaff(spId, center) {
 }
 
 async function quickAssign(empId, center) {
-  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const classrooms = CENTER_CLASSROOMS[center] || MONTESSORI_CLASSROOMS;
   const emp = employees.find(e => e.id === empId);
   
   let html = `<div class="modal-header"><h3>Assign ${emp?.first_name} ${emp?.last_name}</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
@@ -3628,7 +3619,7 @@ async function doQuickAssign(empId, center) {
 }
 
 function showAddStaffingEntry(center) {
-  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const classrooms = CENTER_CLASSROOMS[center] || MONTESSORI_CLASSROOMS;
   let html = `<div class="modal-header"><h3>Add Staff to Staffing Plan</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">
       <div class="form-row">
@@ -3731,7 +3722,7 @@ async function editStaffingEntry(spId) {
   if (!entry) return alert('Entry not found');
   
   const center = entry.center;
-  const classrooms = CENTER_CLASSROOMS[center] || PEACE_CLASSROOMS;
+  const classrooms = CENTER_CLASSROOMS[center] || MONTESSORI_CLASSROOMS;
   
   let html = `<div class="modal-header"><h3>Edit Staffing Entry</h3><button class="modal-close" onclick="closeModal()">&times;</button></div>
     <div class="modal-body">

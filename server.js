@@ -14,6 +14,15 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HUB_JWT_SECRET = process.env.HUB_JWT_SECRET || '';
 
+// ─── CENTERS ─────────────────────────────────────────────────────────────────
+// Peace Boulevard merged into Montessori. Two centers remain.
+// MUST stay in sync with CENTERS in public/index.html.
+const CENTERS = ['Montessori', 'Niles'];
+const RETIRED_CENTER = 'Peace Boulevard';
+// First pay period that runs as a single combined Montessori center.
+// Periods starting before this keep their historical per-center sign-off rows.
+const MERGE_CUTOVER_DATE = '2026-09-09';
+
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
@@ -52,7 +61,7 @@ app.use(async (req, res, next) => {
     const result = await pool.query('SELECT * FROM users WHERE LOWER(username) = $1', [hubUsername]);
     let user = result.rows[0];
     if (!user && hubCenter && hubCenter !== 'all') {
-      const centerMap = { 'peace': 'Peace Boulevard', 'niles': 'Niles', 'montessori': 'Montessori' };
+      const centerMap = { 'peace': 'Montessori', 'niles': 'Niles', 'montessori': 'Montessori' };
       const mappedCenter = centerMap[hubCenter] || hubCenter;
       const dirResult = await pool.query("SELECT * FROM users WHERE role = 'director' AND center = $1 LIMIT 1", [mappedCenter]);
       user = dirResult.rows[0];
@@ -321,6 +330,20 @@ async function initDB() {
     uploaded_at TIMESTAMP DEFAULT NOW()
   )`);
 
+  // ─── CENTER MERGE: Peace Boulevard → Montessori ──────────────────────────────
+  // The Peace Boulevard and Montessori centers combined into a single center
+  // operating as "Montessori". This migration is idempotent — it is a no-op once
+  // no 'Peace Boulevard' rows remain, so it is safe to run on every boot.
+  //
+  // Staff-scoped tables (employees, staffing_plan, users) are relabelled in full,
+  // so every teacher keeps their complete history — PTO, daily hours, time off,
+  // overtime and compliance dates all follow the employee record.
+  //
+  // Period-stamped tables (payroll_periods, payroll_signatures, upload_log) are
+  // only merged from MERGE_CUTOVER_DATE forward. Closed periods before that keep
+  // their separate Peace and Montessori sign-off records as an audit trail.
+  await mergePeaceIntoMontessori();
+
   const userCount = await pool.query('SELECT COUNT(*) FROM users');
   if (parseInt(userCount.rows[0].count) === 0) {
     const hash = await bcrypt.hash('tcc2026', 10);
@@ -329,13 +352,159 @@ async function initDB() {
       ('mary', $1, 'Mary Wardlaw', 'owner', NULL),
       ('jared', $1, 'Jared Simkins', 'payroll', NULL),
       ('amy', $1, 'Amy Gutierrez', 'hr', NULL),
-      ('gabby', $1, 'Gabby Fountain', 'director', 'Peace Boulevard'),
+      ('gabby', $1, 'Gabby Fountain', 'director', 'Montessori'),
       ('kirsten', $1, 'Kirsten', 'director', 'Niles'),
       ('shari', $1, 'Shari', 'director', 'Montessori')
     `, [hash]);
   }
 
   console.log('Database initialized');
+}
+
+// ─── CENTER MERGE MIGRATION ──────────────────────────────────────────────────
+// Idempotent. Folds the retired 'Peace Boulevard' center into 'Montessori'.
+async function mergePeaceIntoMontessori() {
+  const R = RETIRED_CENTER;          // 'Peace Boulevard'
+  const M = 'Montessori';
+  const CUT = MERGE_CUTOVER_DATE;    // first combined pay period
+
+  // Nothing to do once the merge has run and no stale rows have appeared.
+  const pending = await pool.query(
+    `SELECT
+       (SELECT COUNT(*) FROM employees      WHERE center = $1 OR payroll_center = $1) AS emp,
+       (SELECT COUNT(*) FROM staffing_plan  WHERE center = $1 OR source_center  = $1) AS sp,
+       (SELECT COUNT(*) FROM users          WHERE center = $1)                        AS usr,
+       (SELECT COUNT(*) FROM payroll_periods    WHERE center = $1 AND period_start >= $2) AS pp,
+       (SELECT COUNT(*) FROM payroll_signatures WHERE center = $1 AND period_start >= $2) AS sig,
+       (SELECT COUNT(*) FROM upload_log WHERE center = $1
+          AND COALESCE(period_start, uploaded_at::date) >= $2)                          AS ul`,
+    [R, CUT]
+  );
+  const c = pending.rows[0];
+  const total = Object.values(c).reduce((a, n) => a + parseInt(n, 10), 0);
+  if (total === 0) return;
+  console.log(`🔀 Center merge: folding ${R} into ${M} (${total} rows pending)`);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    // 1. Employees — home center and the payroll-report center override.
+    await client.query(`UPDATE employees SET center = $1 WHERE center = $2`, [M, R]);
+    await client.query(`UPDATE employees SET payroll_center = $1 WHERE payroll_center = $2`, [M, R]);
+
+    // 2. Users — Peace directors now direct the combined Montessori center.
+    await client.query(`UPDATE users SET center = $1 WHERE center = $2`, [M, R]);
+
+    // 3. Staffing plan — room assignments and cross-center sub references.
+    await client.query(`UPDATE staffing_plan SET center = $1 WHERE center = $2`, [M, R]);
+    await client.query(`UPDATE staffing_plan SET source_center = $1 WHERE source_center = $2`, [M, R]);
+
+    // 3a. A sub pulled between the two now-merged centers is a sub from itself.
+    //     Drop those — the person is already on the combined plan as staff.
+    await client.query(
+      `DELETE FROM staffing_plan WHERE entry_type = 'sub' AND source_center = center`
+    );
+
+    // 3b. Both centers may have pulled the same Niles sub. Keep the earliest row.
+    await client.query(
+      `DELETE FROM staffing_plan sp USING staffing_plan keep
+        WHERE sp.entry_type = 'sub' AND keep.entry_type = 'sub'
+          AND sp.employee_id IS NOT NULL
+          AND sp.employee_id = keep.employee_id
+          AND sp.center = keep.center
+          AND sp.id > keep.id`
+    );
+
+    // 3c. Drop rows that became exact duplicates of an existing assignment.
+    await client.query(
+      `DELETE FROM staffing_plan sp USING staffing_plan keep
+        WHERE sp.employee_id IS NOT NULL
+          AND sp.employee_id      = keep.employee_id
+          AND sp.center           = keep.center
+          AND sp.classroom        = keep.classroom
+          AND COALESCE(sp.role_in_room, '')   = COALESCE(keep.role_in_room, '')
+          AND COALESCE(sp.entry_type, 'staff') = COALESCE(keep.entry_type, 'staff')
+          AND sp.id > keep.id`
+    );
+
+    // 4. Payroll periods, from the cutover forward only.
+    //    Where both centers already have a row for the same period, fold the
+    //    Peace sign-offs into the Montessori row rather than losing them.
+    await client.query(
+      `UPDATE payroll_periods m SET
+         timecards_uploaded  = m.timecards_uploaded  OR p.timecards_uploaded,
+         timecards_signed_by = COALESCE(m.timecards_signed_by, p.timecards_signed_by),
+         timecards_signed_at = LEAST(m.timecards_signed_at, p.timecards_signed_at),
+         timeoff_approved    = m.timeoff_approved    OR p.timeoff_approved,
+         timeoff_signed_by   = COALESCE(m.timeoff_signed_by, p.timeoff_signed_by),
+         timeoff_signed_at   = LEAST(m.timeoff_signed_at, p.timeoff_signed_at),
+         timeoff_submitted   = m.timeoff_submitted   OR p.timeoff_submitted,
+         timeoff_submitted_by = COALESCE(m.timeoff_submitted_by, p.timeoff_submitted_by),
+         timeoff_submitted_at = LEAST(m.timeoff_submitted_at, p.timeoff_submitted_at),
+         director_closed     = m.director_closed     OR p.director_closed,
+         director_closed_by  = COALESCE(m.director_closed_by, p.director_closed_by),
+         director_closed_at  = GREATEST(m.director_closed_at, p.director_closed_at),
+         payroll_closed      = m.payroll_closed      OR p.payroll_closed,
+         payroll_closed_by   = COALESCE(m.payroll_closed_by, p.payroll_closed_by),
+         payroll_closed_at   = COALESCE(m.payroll_closed_at, p.payroll_closed_at),
+         payroll_accessed_at = LEAST(m.payroll_accessed_at, p.payroll_accessed_at),
+         change_request_pending = m.change_request_pending OR p.change_request_pending,
+         change_request_reason  = COALESCE(m.change_request_reason, p.change_request_reason),
+         qb_uploaded         = m.qb_uploaded         OR p.qb_uploaded,
+         qb_uploaded_by      = COALESCE(m.qb_uploaded_by, p.qb_uploaded_by),
+         qb_uploaded_at      = COALESCE(m.qb_uploaded_at, p.qb_uploaded_at),
+         qb_employees_updated = GREATEST(COALESCE(m.qb_employees_updated, 0),
+                                         COALESCE(p.qb_employees_updated, 0))
+       FROM payroll_periods p
+       WHERE p.center = $1 AND m.center = $2
+         AND p.period_start = m.period_start
+         AND p.period_end   = m.period_end
+         AND p.period_start >= $3`,
+      [R, M, CUT]
+    );
+
+    // 4a. Peace rows with no Montessori twin simply become Montessori rows.
+    await client.query(
+      `UPDATE payroll_periods SET center = $2
+        WHERE center = $1 AND period_start >= $3
+          AND NOT EXISTS (
+            SELECT 1 FROM payroll_periods m
+             WHERE m.center = $2
+               AND m.period_start = payroll_periods.period_start
+               AND m.period_end   = payroll_periods.period_end)`,
+      [R, M, CUT]
+    );
+
+    // 4b. Anything left was folded in above.
+    await client.query(
+      `DELETE FROM payroll_periods WHERE center = $1 AND period_start >= $2`, [R, CUT]
+    );
+
+    // 5. Signatures — relabel from the cutover forward. There is no unique key
+    //    here, so both centers' signatures survive as separate audit records.
+    await client.query(
+      `UPDATE payroll_signatures SET center = $2 WHERE center = $1 AND period_start >= $3`,
+      [R, M, CUT]
+    );
+
+    // 6. Upload log — relabel from the cutover forward. period_start is nullable
+    //    on non-timecard uploads, so fall back to the upload timestamp.
+    await client.query(
+      `UPDATE upload_log SET center = $2
+        WHERE center = $1 AND COALESCE(period_start, uploaded_at::date) >= $3`,
+      [R, M, CUT]
+    );
+
+    await client.query('COMMIT');
+    console.log(`✅ Center merge complete: ${R} → ${M}`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error('❌ Center merge failed, rolled back:', err.message);
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ========================
@@ -1791,18 +1960,21 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     });
     const sig = await pool.query("SELECT value, updated_at FROM app_settings WHERE key = 'owner_signature'");
     const sigData = sig.rows[0];
-    const licenseNum = center === 'Montessori' ? 'DC110278344' : 'DC110415511';
+    // Combined Montessori center operates under the former Peace Boulevard license.
+    const licenseNum = 'DC110415511';
     const centerFull = center === 'Montessori' ? 'Montessori Children\'s Center' : `The Children's Center - ${center}`;
     function fd(d) { if (!d) return ''; const s = typeof d === 'string' ? d : d.toISOString ? d.toISOString() : String(d); const m = s.match(/(\d{4})-(\d{2})-(\d{2})/); return m ? parseInt(m[2])+'/'+parseInt(m[3])+'/'+m[1].slice(2) : ''; }
     const classrooms = {};
     rows.forEach(r => { if (!classrooms[r.classroom]) classrooms[r.classroom] = []; classrooms[r.classroom].push(r); });
     
     // Use center-specific template to determine which classrooms to show and their order
-    // These MUST match the classroom names used in index.html (PEACE_CLASSROOMS, NILES_CLASSROOMS, MCC_CLASSROOMS)
-    const peaceTemplate = ['Infants - Caterpillars','Infants/Toddlers - Butterflies','Toddlers - Dolphins','Toddlers - Kangas','Toddlers - Lions','Montessori Infants','Twos - Bears','Twos/Threes - Tigers','GSRP - Penguins','GSRP - Dinos','Threes/Fours Flamingos'];
+    // These MUST match the classroom names used in index.html (MONTESSORI_CLASSROOMS, NILES_CLASSROOMS)
+    const montessoriTemplate = ['Seedlings','Sprouts','Saplings','Acorns','Maple','Redwood','Spruce','Oak','Willow'];
     const nilesTemplate = ['Infants/Ones','Ones/Twos','Strong Beginnings - Threes','GSRP - 1 (4-Day)','GSRP - 2 (4-Day)','Toddler','Multi-Age - Miss Judy'];
-    const montessoriTemplate = ['Toddlers - Purple','Pre-Primary - Yellow','Primary - Red','GSRP - Orange','GSRP - Blue','GSRP - Pink'];
-    const centerRooms = center === 'Niles' ? nilesTemplate : center === 'Montessori' ? montessoriTemplate : peaceTemplate;
+    const centerRooms = center === 'Niles' ? nilesTemplate : montessoriTemplate;
+    // Licensing ratios printed beside each room name.
+    const roomRatios = { 'Seedlings':'1:4', 'Sprouts':'1:4', 'Saplings':'1:4', 'Acorns':'1:4',
+                         'Maple':'1:8', 'Redwood':'1:10', 'Spruce':'1:10', 'Oak':'1:10', 'Willow':'1:10' };
     const bottomSections = ['Admin / Office / Food Prep', 'Floaters', 'Subs from other centers', 'Therapist / Unsupervised Volunteers', 'Supervised Volunteers'];
     
     // Show ALL template classrooms (even empty) + any non-template classrooms that have actual staff
@@ -1826,7 +1998,8 @@ app.get('/api/staffing-plan/print/:center', requireAuth, async (req, res) => {
     let tableRows = '';
     for (const cls of orderedClassrooms) {
       const staff = classrooms[cls] || [];
-      tableRows += `<tr class="section"><td colspan="19">${cls}</td></tr>`;
+      const ratioTag = roomRatios[cls] ? ` <span style="font-weight:400;font-size:6pt;opacity:0.8">· Ratio ${roomRatios[cls]}</span>` : '';
+      tableRows += `<tr class="section"><td colspan="19">${cls}${ratioTag}</td></tr>`;
       staff.forEach(s => {
         const nameDisplay = (s.first_name||'')+' '+(s.last_name||'');
         const homeTag = s.entry_type === 'sub' && s.source_center ? ` <span style="font-size:5pt;color:#888">(${s.source_center})</span>` : '';
@@ -1874,7 +2047,7 @@ app.get('/api/payroll-period-status', requireAuth, async (req, res) => {
   try {
     const pp = getPayPeriod(req.query.date ? new Date(req.query.date + 'T12:00:00') : new Date());
     const user = req.session.user;
-    const centers = user.role === 'director' ? [user.center] : ['Peace Boulevard', 'Niles', 'Montessori'];
+    const centers = user.role === 'director' ? [user.center] : CENTERS;
     const results = {};
     for (const center of centers) {
       await pool.query(`INSERT INTO payroll_periods (period_start, period_end, pay_date, center) VALUES ($1, $2, $3, $4) ON CONFLICT (period_start, period_end, center) DO NOTHING`, [pp.start, pp.end, pp.payDate, center]);
@@ -2054,7 +2227,7 @@ app.post('/api/payroll-workflow/payroll-close', requireRole('owner', 'payroll'),
     const { period_start, period_end, signature_name } = req.body;
     const user = req.session.user;
     await pool.query(`UPDATE payroll_periods SET payroll_closed = TRUE, payroll_closed_by = $1, payroll_closed_at = NOW(), status = 'closed' WHERE period_start = $2 AND period_end = $3`, [signature_name, period_start, period_end]);
-    for (const center of ['Peace Boulevard', 'Niles', 'Montessori']) {
+    for (const center of CENTERS) {
       await pool.query(`INSERT INTO payroll_signatures (period_start, period_end, center, action_type, signed_by_user_id, signed_by_name, signature_text, statement) VALUES ($1, $2, $3, 'payroll_processed', $4, $5, $6, 'Payroll has been processed for this pay period.')`, [period_start, period_end, center, user.id, user.full_name, signature_name]);
     }
     res.json({ ok: true });
