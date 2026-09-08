@@ -21,7 +21,8 @@ const CENTERS = ['Montessori', 'Niles'];
 const RETIRED_CENTER = 'Peace Boulevard';
 // First pay period that runs as a single combined Montessori center.
 // Periods starting before this keep their historical per-center sign-off rows.
-const MERGE_CUTOVER_DATE = '2026-09-09';
+// Set to the Aug 24 – Sep 8, 2026 period, so it merges along with everything after.
+const MERGE_CUTOVER_DATE = '2026-08-24';
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
