@@ -126,6 +126,11 @@ body { font-family: 'DM Sans', sans-serif; background: var(--gray-50); color: va
 
 /* ===== CARDS ===== */
 .stats-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.upload-stats { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+/* Keep the wide upload table from forcing the page wider than the viewport:
+   contain its inline size so the table scrolls inside the card instead. */
+.upload-table-scroll { overflow-x: auto; contain: inline-size; }
+@media (max-width: 700px) { .upload-stats { grid-template-columns: 1fr; } }
 .stat-card {
   background: var(--white); border-radius: var(--radius); padding: 20px; box-shadow: var(--shadow-sm);
   border-left: 4px solid var(--navy);
@@ -551,6 +556,7 @@ function buildNav() {
       { id: 'dashboard', icon: '📊', label: 'PTO Summary', roles: ['hr'] },
       { section: 'Other' },
       { id: 'documents', icon: '📎', label: 'Documents', roles: ['hr'] },
+      { id: 'upload-history', icon: '📥', label: 'Upload History', roles: ['hr'] },
     ];
   } else {
     // Mary & Jared: Payroll processing, pay increases, documents at top, then everything else
@@ -570,6 +576,7 @@ function buildNav() {
      { id: 'archive', icon: '📦', label: 'Archive', roles: ['owner','payroll'] },
       { id: 'payroll-archives', icon: '🗂️', label: 'Payroll Archives', roles: ['owner','payroll'] },
       { id: 'overtime-view', icon: '⏱️', label: 'Overtime View', roles: ['owner','payroll'] },
+      { id: 'upload-history', icon: '📥', label: 'Upload History', roles: ['owner','payroll'] },
     ];
     if (role === 'owner') {
       items.push({ section: 'Settings' });
@@ -626,7 +633,8 @@ function navigate(page) {
     'documents': 'Document Center',
     'staffing-plan': 'Staffing Plan',
     'archive': 'Employee Archive',
-    'signature': 'Signature Settings',     'payroll-archives': 'Payroll Report Archives',     'overtime-view': 'Overtime View'
+    'signature': 'Signature Settings',     'payroll-archives': 'Payroll Report Archives',     'overtime-view': 'Overtime View',
+    'upload-history': 'Upload History'
   };
   document.getElementById('pageTitle').textContent = titles[page] || page;
   
@@ -642,7 +650,8 @@ function navigate(page) {
     'documents': renderDocuments,
     'staffing-plan': renderStaffingPlan,
     'archive': renderArchive,
-    'signature': renderSignature,     'payroll-archives': renderPayrollArchives,     'overtime-view': renderOvertimeView
+    'signature': renderSignature,     'payroll-archives': renderPayrollArchives,     'overtime-view': renderOvertimeView,
+    'upload-history': renderUploadHistory
   };
   
   if (renderers[page]) renderers[page]();
@@ -4176,6 +4185,162 @@ async function viewArchivedReport(id) {
     document.getElementById('modalContent').innerHTML = html;
     document.getElementById('modalOverlay').classList.add('active');
   } catch(e) { alert('Error loading archive: ' + e.message); }
+}
+
+// ========================
+// UPLOAD HISTORY
+// ========================
+let uploadLogDays = 30;
+let uploadLogCenter = '';
+let uploadLogRaw = [];
+
+function escHtml(v) {
+  return String(v == null ? '' : v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// unmatched_names arrives as "Last, First" entries joined by ", ", so the raw
+// string is ambiguous ("Sub, Teacher, Reyna-Adams, Noemi" is two people).
+// Re-pair the pieces two at a time; fall back to the raw parts if it is odd.
+function splitUnmatchedNames(raw) {
+  if (!raw) return [];
+  const parts = String(raw).split(',').map(p => p.trim()).filter(Boolean);
+  if (parts.length === 0) return [];
+  if (parts.length % 2 !== 0) return parts;
+  const names = [];
+  for (let i = 0; i < parts.length; i += 2) names.push(parts[i] + ', ' + parts[i + 1]);
+  return names;
+}
+
+function uploadStatus(r) {
+  if (Number(r.total_rows) === 0) return { key: 'failed', label: 'Nothing imported', color: 'var(--danger)', bg: 'var(--danger-bg)' };
+  if (Number(r.unmatched_rows) > 0) return { key: 'partial', label: 'Hours dropped', color: 'var(--warning)', bg: 'var(--warning-bg)' };
+  return { key: 'ok', label: 'OK', color: 'var(--success)', bg: 'var(--success-bg)' };
+}
+
+function setUploadLogDays(d) { uploadLogDays = d; renderUploadHistory(); }
+function setUploadLogCenter(c) { uploadLogCenter = c; renderUploadHistory(true); }
+
+async function renderUploadHistory(useCache) {
+  const el = document.getElementById('pageContent');
+
+  if (!useCache) {
+    el.innerHTML = `<div class="card"><div class="card-body"><div class="empty-state"><p>Loading upload history…</p></div></div></div>`;
+    try {
+      const qs = new URLSearchParams({ limit: '300' });
+      if (uploadLogDays) qs.set('days', String(uploadLogDays));
+      uploadLogRaw = await api('/api/upload-log?' + qs.toString());
+    } catch (e) {
+      el.innerHTML = `<div class="card"><div class="card-body"><div class="empty-state">
+        <div class="icon">⚠️</div><p>Could not load upload history: ${escHtml(e.message)}</p></div></div></div>`;
+      return;
+    }
+  }
+
+  const centers = [...new Set(uploadLogRaw.map(r => r.center).filter(Boolean))].sort();
+  const rows = uploadLogCenter ? uploadLogRaw.filter(r => r.center === uploadLogCenter) : uploadLogRaw;
+
+  const failed = rows.filter(r => uploadStatus(r).key === 'failed');
+  const partial = rows.filter(r => uploadStatus(r).key === 'partial');
+  const droppedRows = partial.reduce((sum, r) => sum + Number(r.unmatched_rows || 0), 0);
+  const affected = new Set();
+  partial.forEach(r => splitUnmatchedNames(r.unmatched_names).forEach(n => affected.add(n)));
+
+  // Flag repeat uploads of the same file to the same center within this window.
+  const fileCounts = {};
+  rows.forEach(r => { const k = r.center + '|' + r.filename; fileCounts[k] = (fileCounts[k] || 0) + 1; });
+
+  const windows = [[7, '7 days'], [30, '30 days'], [90, '90 days'], [0, 'All']];
+  let html = `<div class="card" style="margin-bottom:20px"><div class="card-body" style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;min-width:0">
+    <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+      <span style="font-size:12px;font-weight:600;color:var(--gray-600)">Period:</span>
+      ${windows.map(([d, label]) => `<button class="btn btn-sm ${uploadLogDays === d ? 'btn-primary' : 'btn-outline'}" onclick="setUploadLogDays(${d})">${label}</button>`).join('')}
+    </div>
+    <div style="display:flex;gap:6px;align-items:center">
+      <span style="font-size:12px;font-weight:600;color:var(--gray-600)">Center:</span>
+      <select onchange="setUploadLogCenter(this.value)" style="padding:6px 10px;border:1.5px solid var(--gray-300);border-radius:6px;font-family:inherit;font-size:12px">
+        <option value="">All centers</option>
+        ${centers.map(c => `<option value="${escHtml(c)}" ${uploadLogCenter === c ? 'selected' : ''}>${c === 'All' ? 'Org-wide (QuickBooks)' : escHtml(c)}</option>`).join('')}
+      </select>
+    </div>
+  </div></div>`;
+
+  html += `<div class="stats-row upload-stats">
+    <div class="stat-card gold"><div class="stat-label">Uploads</div><div class="stat-value">${rows.length}</div>
+      <div class="stat-sub">${uploadLogDays ? 'last ' + uploadLogDays + ' days' : 'all time (max 300)'}</div></div>
+    <div class="stat-card ${failed.length ? 'red' : 'green'}"><div class="stat-label">Nothing imported</div><div class="stat-value">${failed.length}</div>
+      <div class="stat-sub">file uploaded, zero rows read</div></div>
+    <div class="stat-card ${droppedRows ? 'red' : 'green'}"><div class="stat-label">Day-rows dropped</div><div class="stat-value">${droppedRows}</div>
+      <div class="stat-sub">hours that did not save</div></div>
+    <div class="stat-card ${affected.size ? 'red' : 'green'}"><div class="stat-label">Staff affected</div><div class="stat-value">${affected.size}</div>
+      <div class="stat-sub">names not matched to roster</div></div>
+  </div>`;
+
+  // ---- Needs attention ----
+  if (partial.length || failed.length) {
+    html += `<div class="card" style="margin-bottom:20px;border-left:4px solid var(--danger)">
+      <div class="card-header"><h3 style="color:var(--danger)">⚠️ Needs attention</h3></div><div class="card-body">`;
+
+    if (partial.length) {
+      html += `<div style="font-weight:700;font-size:13px;margin-bottom:6px">Staff hours that did not save</div>
+        <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">These names in the CSV did not match anyone on the roster, so their days were skipped. Fix the spelling on the employee record (or in Playground) and upload the file again.</p>`;
+      partial.forEach(r => {
+        const names = splitUnmatchedNames(r.unmatched_names);
+        html += `<div style="background:var(--danger-bg);border-radius:8px;padding:12px 14px;margin-bottom:10px">
+          <div style="font-weight:700;font-size:13px;color:var(--danger)">${escHtml(names.join(' · ') || 'Unnamed rows')} — ${r.unmatched_rows} day${Number(r.unmatched_rows) === 1 ? '' : 's'} dropped</div>
+          <div style="font-size:11px;color:var(--gray-600);margin-top:4px">
+            ${escHtml(r.center)} · uploaded by ${escHtml(r.uploaded_by)} on ${new Date(r.uploaded_at).toLocaleString()}<br>
+            <span style="font-family:'JetBrains Mono',monospace;word-break:break-all">${escHtml(r.filename)}</span></div>
+        </div>`;
+      });
+    }
+
+    if (failed.length) {
+      html += `<div style="font-weight:700;font-size:13px;margin:${partial.length ? '18px' : '0'} 0 6px">Uploads that imported nothing</div>
+        <p style="font-size:12px;color:var(--gray-600);margin-bottom:12px">The file was accepted but no rows could be read — usually the wrong Playground report. It must be <strong>Daily Staff Hours</strong>, not Staff Attendance Overview.</p>`;
+      failed.forEach(r => {
+        html += `<div style="background:var(--warning-bg);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12px">
+          <span style="font-family:'JetBrains Mono',monospace;word-break:break-all">${escHtml(r.filename)}</span><br>
+          <span style="color:var(--gray-600)">${escHtml(r.center)} · ${escHtml(r.uploaded_by)} · ${new Date(r.uploaded_at).toLocaleString()}</span>
+        </div>`;
+      });
+    }
+    html += `</div></div>`;
+  }
+
+  // ---- Full log ----
+  html += `<div class="card"><div class="card-header"><h3>All uploads (${rows.length})</h3>
+    <div style="font-size:12px;color:var(--gray-400)">Newest first · times shown in your local time</div></div><div class="card-body">`;
+
+  if (rows.length === 0) {
+    html += `<div class="empty-state"><div class="icon">📥</div><p>No uploads in this period.</p></div>`;
+  } else {
+    html += `<div class="upload-table-scroll"><table class="data-table"><thead><tr>
+      <th>When</th><th>Who</th><th>Center</th><th>Type</th><th>File</th><th>Rows</th><th>Status</th>
+    </tr></thead><tbody>`;
+    rows.forEach(r => {
+      const st = uploadStatus(r);
+      const when = new Date(r.uploaded_at);
+      const repeat = fileCounts[r.center + '|' + r.filename] > 1;
+      html += `<tr>
+        <td style="white-space:nowrap;font-size:12px">${when.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}<br>
+          <span style="color:var(--gray-600)">${when.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span></td>
+        <td>${escHtml(r.uploaded_by)}</td>
+        <td>${r.center === 'All' ? 'Org-wide' : escHtml(r.center)}</td>
+        <td style="font-size:11px;color:var(--gray-600)">${r.upload_type === 'qb-payroll-ytd' ? 'QuickBooks' : 'Timecards'}</td>
+        <td style="font-size:11px;font-family:'JetBrains Mono',monospace;max-width:320px;word-break:break-all">${escHtml(r.filename)}
+          ${repeat ? '<span style="display:inline-block;margin-left:6px;padding:1px 6px;border-radius:10px;background:var(--gray-100);color:var(--gray-600);font-family:inherit;font-size:10px">repeat</span>' : ''}</td>
+        <td style="font-family:'JetBrains Mono',monospace;white-space:nowrap">${r.matched_rows}/${r.total_rows}</td>
+        <td><span style="display:inline-block;padding:3px 9px;border-radius:12px;font-size:11px;font-weight:600;color:${st.color};background:${st.bg};white-space:nowrap">${st.label}</span>
+          ${Number(r.unmatched_rows) > 0 ? `<div style="font-size:10px;color:var(--danger);margin-top:3px">${escHtml(splitUnmatchedNames(r.unmatched_names).join(', '))}</div>` : ''}</td>
+      </tr>`;
+    });
+    html += `</tbody></table></div>`;
+  }
+  html += `</div></div>`;
+
+  el.innerHTML = html;
 }
 
 // ========================

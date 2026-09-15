@@ -2137,20 +2137,36 @@ app.post('/api/payroll-workflow/force-unlock-timecards', requireRole('owner', 'p
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// Upload log: retrieve history of CSV uploads for a center/period
+// Upload log: retrieve history of CSV uploads for a center/period.
+// Powers the Upload History screen, so it takes an optional `days` window and
+// `limit`. The heavy `notes` column (a large JSON blob on QuickBooks imports)
+// is left out — the list view never shows it and it dominates the payload.
 app.get('/api/upload-log', requireRole('owner', 'payroll', 'hr'), async (req, res) => {
   try {
-    const { center, period_start, period_end } = req.query;
-    let query = 'SELECT * FROM upload_log ORDER BY uploaded_at DESC LIMIT 50';
-    let params = [];
-    if (center && period_start && period_end) {
-      query = 'SELECT * FROM upload_log WHERE center = $1 AND period_start = $2 AND period_end = $3 ORDER BY uploaded_at DESC';
-      params = [center, period_start, period_end];
-    } else if (center) {
-      query = 'SELECT * FROM upload_log WHERE center = $1 ORDER BY uploaded_at DESC LIMIT 20';
-      params = [center];
+    const { center, period_start, period_end, days } = req.query;
+    const cols = `id, center, period_start, period_end, upload_type, filename,
+                  uploaded_by, uploaded_by_user_id, total_rows, matched_rows,
+                  unmatched_rows, unmatched_names, saved_days, uploaded_at`;
+    const where = [];
+    const params = [];
+    if (center) { params.push(center); where.push(`center = $${params.length}`); }
+    if (period_start && period_end) {
+      params.push(period_start); where.push(`period_start = $${params.length}`);
+      params.push(period_end);   where.push(`period_end = $${params.length}`);
     }
-    const result = await pool.query(query, params);
+    const dayWindow = parseInt(days, 10);
+    if (Number.isFinite(dayWindow) && dayWindow > 0) {
+      params.push(dayWindow);
+      // uploaded_at is a bare timestamp holding UTC, so compare against UTC now.
+      where.push(`uploaded_at >= (NOW() AT TIME ZONE 'UTC') - make_interval(days => $${params.length}::int)`);
+    }
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 500);
+    const result = await pool.query(
+      `SELECT ${cols} FROM upload_log
+       ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
+       ORDER BY uploaded_at DESC LIMIT ${limit}`,
+      params
+    );
     res.json(result.rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
