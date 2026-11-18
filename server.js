@@ -1539,11 +1539,11 @@ function mostRecentPaidPeriod(today) {
 }
 
 function requireUploadKey(req, res, next) {
-  const expected = process.env.QB_UPLOAD_KEY || '';
+  const expected = String(process.env.QB_UPLOAD_KEY || '').trim();
   if (expected.length < 32) {
     return res.status(503).json({ error: 'Automated upload is not switched on (QB_UPLOAD_KEY is not set on the server).' });
   }
-  const given = String(req.get('X-Upload-Key') || '');
+  const given = String(req.get('X-Upload-Key') || '').trim();
   const a = Buffer.from(given), b = Buffer.from(expected);
   if (a.length !== b.length || !require('crypto').timingSafeEqual(a, b)) {
     return res.status(401).json({ error: 'Upload key not accepted.' });
