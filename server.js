@@ -1485,7 +1485,15 @@ async function handleQbPayrollImport(req, res) {
       const inactiveLast = new Set(inactive.rows.map(e => norm(e.last_name)));
       for (const u of unmatched) {
         const last = String(u.name || '').split(',')[0];
-        u.status = inactiveLast.has(norm(last)) ? 'inactive in roster (likely former staff)' : 'not on the roster at all';
+        const sameSurname = allEmployees.filter(e => norm(e.lastName) === norm(last));
+        if (sameSurname.length) {
+          // An ACTIVE employee shares this surname: almost always the first name
+          // is spelled differently in QuickBooks than in the Hub roster.
+          u.status = 'spelling mismatch with active employee';
+          u.activeMatch = sameSurname.map(e => `${e.lastName}, ${e.firstName}`).join(' / ');
+        } else {
+          u.status = inactiveLast.has(norm(last)) ? 'inactive in roster (likely former staff)' : 'not on the roster (likely former staff)';
+        }
       }
     } catch (e) { console.error('Unmatched labelling error:', e.message); }
 
