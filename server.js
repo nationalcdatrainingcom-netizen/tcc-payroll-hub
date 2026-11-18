@@ -995,7 +995,10 @@ app.post('/api/timeoff-change-requests/:id/deny', requireRole('owner', 'payroll'
 });
 
 // QuickBooks payroll summary upload
-app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), async (req, res) => {
+async function handleQbPayrollImport(req, res) {
+  // Who is uploading: a signed-in person, or the scheduled PTO routine (see
+  // /api/automation/qb-payroll-upload below, which sets req.automationUser).
+  const actor = req.automationUser || req.session.user;
   try {
     console.log('[QB IMPORT YTD] req.body:', JSON.stringify(req.body));
     const XLSX = require('xlsx');
@@ -1450,7 +1453,7 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
         await pool.query(
           `UPDATE payroll_periods SET qb_uploaded = TRUE, qb_uploaded_by = $1, qb_uploaded_at = NOW(), qb_employees_updated = $2
            WHERE period_start = $3 AND period_end = $4`,
-          [req.session.user.full_name, matched, currentPP.start, currentPP.end]
+          [actor.full_name, matched, currentPP.start, currentPP.end]
         );
       } catch (e) { console.error('QB status update error:', e.message); }
     }
@@ -1460,7 +1463,7 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       await pool.query(
         `INSERT INTO upload_log (center, upload_type, filename, uploaded_by, uploaded_by_user_id, total_rows, matched_rows, notes)
          VALUES ('All', 'qb-payroll-ytd', $1, $2, $3, $4, $5, $6)`,
-        [req.file?.originalname, req.session.user.full_name, req.session.user.id, data.length, matched,
+        [req.file?.originalname, actor.full_name, actor.id, data.length, matched,
          JSON.stringify({
            dateRange,
            layout,
@@ -1474,8 +1477,22 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
       );
     } catch (logErr) { console.error('Upload log error:', logErr.message); }
 
+    // Label each unmatched name: is there an INACTIVE employee with that
+    // surname (likely former staff), or is it someone the roster doesn't know?
+    try {
+      const inactive = await pool.query(`SELECT first_name, last_name FROM employees WHERE is_active = FALSE`);
+      const norm = x => (x || '').toLowerCase().replace(/[-\s,.]/g, '');
+      const inactiveLast = new Set(inactive.rows.map(e => norm(e.last_name)));
+      for (const u of unmatched) {
+        const last = String(u.name || '').split(',')[0];
+        u.status = inactiveLast.has(norm(last)) ? 'inactive in roster (likely former staff)' : 'not on the roster at all';
+      }
+    } catch (e) { console.error('Unmatched labelling error:', e.message); }
+
     res.json({
       dateRange,
+      payPeriod: { start: currentPP.start, end: currentPP.end, payDate: req.automationPeriod ? req.automationPeriod.payDate : undefined },
+      notInActiveRoster: unmatched,
       totalEmployeesWithPTO: results.filter(r => r.hours > 0 || r.hoursWorked > 0).length,
       matched,
       salariedSkippedPto,
@@ -1495,7 +1512,54 @@ app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.singl
     console.error('[QB IMPORT YTD] Error:', err);
     res.status(500).json({ error: err.message });
   }
-});
+}
+
+app.post('/api/import-qb-payroll', requireRole('owner', 'payroll'), upload.single('file'), handleQbPayrollImport);
+
+// ─── QuickBooks payroll summary upload for the scheduled PTO routine ─────────
+// The routine cannot sign in with a password, so it sends a private upload key
+// in the X-Upload-Key header instead. The key lives only in the Render
+// environment variable QB_UPLOAD_KEY (and in the routine's own key file).
+// With no QB_UPLOAD_KEY set, this route is switched off.
+//
+// This route does ONE thing: the Step 5 "Upload QuickBooks Payroll Summary"
+// import, exactly as the button does. It always files the upload under the
+// most recent pay period whose pay date is on or before today, never a future
+// pay date, whatever the caller sends.
+function mostRecentPaidPeriod(today) {
+  const t = today || new Date();
+  const todayIso = new Date(t.getTime() - t.getTimezoneOffset() * 60000).toISOString().split('T')[0];
+  let pp = getPayPeriod(t);
+  for (let i = 0; i < 4 && pp.payDate > todayIso; i++) {
+    const prev = new Date(pp.start + 'T12:00:00');
+    prev.setDate(prev.getDate() - 1);
+    pp = getPayPeriod(prev);
+  }
+  return pp;
+}
+
+function requireUploadKey(req, res, next) {
+  const expected = process.env.QB_UPLOAD_KEY || '';
+  if (expected.length < 32) {
+    return res.status(503).json({ error: 'Automated upload is not switched on (QB_UPLOAD_KEY is not set on the server).' });
+  }
+  const given = String(req.get('X-Upload-Key') || '');
+  const a = Buffer.from(given), b = Buffer.from(expected);
+  if (a.length !== b.length || !require('crypto').timingSafeEqual(a, b)) {
+    return res.status(401).json({ error: 'Upload key not accepted.' });
+  }
+  req.automationUser = { id: null, full_name: 'Scheduled PTO routine', role: 'payroll' };
+  next();
+}
+
+app.post('/api/automation/qb-payroll-upload', requireUploadKey, upload.single('file'), (req, res, next) => {
+  if (!req.file) return res.status(400).json({ error: 'No file received. Send the .xlsx as form field "file".' });
+  const pp = mostRecentPaidPeriod(new Date());
+  req.body = { ...(req.body || {}), period_start: pp.start, period_end: pp.end };
+  req.automationPeriod = pp;
+  console.log('[QB AUTOMATION] Filing upload under', pp.label, 'pay date', pp.payDate);
+  next();
+}, handleQbPayrollImport);
 
 // Pay increase requests
 app.get('/api/pay-increases', requireRole('owner', 'hr', 'payroll'), async (req, res) => {
