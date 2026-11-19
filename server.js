@@ -1484,8 +1484,12 @@ async function handleQbPayrollImport(req, res) {
       const norm = x => (x || '').toLowerCase().replace(/[-\s,.]/g, '');
       const inactiveLast = new Set(inactive.rows.map(e => norm(e.last_name)));
       for (const u of unmatched) {
-        const last = String(u.name || '').split(',')[0];
-        const sameSurname = allEmployees.filter(e => norm(e.lastName) === norm(last));
+        const [last, firstRaw] = String(u.name || '').split(',');
+        const initial = norm(firstRaw).charAt(0);
+        // Same surname AND same first initial (Elizabeth/Elle, Abigail/Abby),
+        // so relatives who share a surname are not paired up.
+        const sameSurname = allEmployees.filter(e => norm(e.lastName) === norm(last) &&
+          initial && norm(e.firstName).charAt(0) === initial);
         if (sameSurname.length) {
           // An ACTIVE employee shares this surname: almost always the first name
           // is spelled differently in QuickBooks than in the Hub roster.
